@@ -1,26 +1,33 @@
 import { useCurrentAccount, useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
-import { PACKAGE_ID, INBOX_REGISTRY_ID } from '../constants';
+import { PACKAGE_ID } from '../constants';
 import { useState, useEffect } from 'react';
 import { RefreshCw, MessageSquare, CheckCheck } from 'lucide-react';
 
-export function Inbox() {
+interface InboxProps {
+    onSelectChat: (chatId: string) => void;
+}
+
+// TODO: Move to constants or fetch dynamically
+const INBOX_REGISTRY_ID = "";
+
+export function Inbox({ }: InboxProps) {
     const account = useCurrentAccount();
-    const client = useSuiClient();
+    const suiClient = useSuiClient();
     const { mutate: signAndExecute } = useSignAndExecuteTransaction();
-    const [isCreating, setIsCreating] = useState(false);
-    const [isMarkingRead, setIsMarkingRead] = useState(false);
+
     const [inboxId, setInboxId] = useState<string | null>(null);
     const [inboxData, setInboxData] = useState<any>(null);
     const [isLoading, setIsLoading] = useState(false);
-    const [fetchError, setFetchError] = useState<string | null>(null);
+    const [isCreating, setIsCreating] = useState(false);
+    const [isMarkingRead, setIsMarkingRead] = useState(false);
 
     // Função para buscar o ID da Inbox na tabela do Registry
     const fetchInboxId = async () => {
         if (!account || !INBOX_REGISTRY_ID) return;
         setIsLoading(true);
         try {
-            const registryObj = await client.getObject({
+            const registryObj = await suiClient.getObject({
                 id: INBOX_REGISTRY_ID,
                 options: { showContent: true }
             });
@@ -32,7 +39,7 @@ export function Inbox() {
             const fields = (registryObj.data.content as any).fields;
             const tableId = fields.inboxes.fields.id.id;
 
-            const dynamicField = await client.getDynamicFieldObject({
+            const dynamicField = await suiClient.getDynamicFieldObject({
                 parentId: tableId,
                 name: {
                     type: 'address',
@@ -61,7 +68,7 @@ export function Inbox() {
     const fetchInboxData = async () => {
         if (!inboxId) return;
         try {
-            const res = await client.getObject({
+            const res = await suiClient.getObject({
                 id: inboxId,
                 options: { showContent: true }
             });
@@ -78,7 +85,7 @@ export function Inbox() {
         } else {
             setInboxData(null);
         }
-    }, [inboxId, client]);
+    }, [inboxId, suiClient]);
 
     // Tenta buscar ao montar e periodicamente
     useEffect(() => {
@@ -90,7 +97,7 @@ export function Inbox() {
         }
         const interval = setInterval(fetchInboxId, 5000);
         return () => clearInterval(interval);
-    }, [account, client, inboxId]);
+    }, [account, suiClient, inboxId]);
 
 
     const createInbox = () => {
@@ -102,7 +109,7 @@ export function Inbox() {
         });
 
         signAndExecute({
-            transaction: tx,
+            transaction: tx as any,
         }, {
             onSuccess: () => {
                 console.log("Inbox created successfully! Waiting for indexer...");
@@ -125,7 +132,7 @@ export function Inbox() {
 
         try {
             // 1. Fetch all Message objects owned by user
-            const messages = await client.getOwnedObjects({
+            const messages = await suiClient.getOwnedObjects({
                 owner: account.address,
                 filter: {
                     StructType: `${PACKAGE_ID}::message::Message`
@@ -173,7 +180,7 @@ export function Inbox() {
             });
 
             signAndExecute({
-                transaction: tx,
+                transaction: tx as any,
             }, {
                 onSuccess: () => {
                     console.log("Marked messages as read successfully!");
@@ -204,7 +211,6 @@ export function Inbox() {
     if (!account) return null;
 
     if (isLoading && !inboxId) return <div className="text-center p-4 text-[var(--sui-text-secondary)] animate-pulse">Loading inbox...</div>;
-    if (fetchError) return <div className="text-red-400 p-4 bg-red-500/10 rounded-lg border border-red-500/30">Error: {fetchError}</div>;
 
     // Se não tiver inbox, mostra botão para criar
     if (!inboxId) {

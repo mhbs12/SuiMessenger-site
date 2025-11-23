@@ -2,7 +2,7 @@ import { blake2b } from '@noble/hashes/blake2.js';
 import { SealClient, SessionKey } from '@mysten/seal';
 import { SuiClient, getFullnodeUrl } from '@mysten/sui/client';
 import { Transaction } from '@mysten/sui/transactions';
-import { fromHEX, toHEX } from '@mysten/sui/utils';
+import { fromHEX, toHEX, normalizeSuiAddress } from '@mysten/sui/utils';
 import { PACKAGE_ID, SEAL_KEY_SERVERS_TESTNET, SEAL_THRESHOLD, SEAL_SESSION_TTL_MINUTES } from '../constants';
 
 // ==================== BLAKE2b HASHING ====================
@@ -23,8 +23,22 @@ let suiClientInstance: SuiClient | null = null;
 
 function getSuiClient(): SuiClient {
     if (!suiClientInstance) {
-        suiClientInstance = new SuiClient({ url: getFullnodeUrl('testnet') });
+        console.log('[SEAL Debug] Initializing new SuiClient...');
+        try {
+            const url = getFullnodeUrl('testnet');
+            console.log('[SEAL Debug] Fullnode URL:', url);
+            suiClientInstance = new SuiClient({ url });
+        } catch (e) {
+            console.error('[SEAL Debug] Failed to initialize SuiClient:', e);
+            // Fallback to direct URL if getFullnodeUrl fails
+            suiClientInstance = new SuiClient({ url: 'https://fullnode.testnet.sui.io:443' });
+        }
     }
+
+    if (!suiClientInstance) {
+        throw new Error('Failed to initialize SuiClient');
+    }
+
     return suiClientInstance;
 }
 
@@ -40,14 +54,104 @@ export function initializeSealClient(): SealClient {
         return sealClientInstance;
     }
 
-    sealClientInstance = new SealClient({
-        suiClient: getSuiClient() as any, // Type assertion needed due to SDK version mismatch
-        serverConfigs: SEAL_KEY_SERVERS_TESTNET.map(server => ({
-            objectId: server.objectId,
-            weight: server.weight,
-        })),
-        verifyKeyServers: false, // Skip verification for faster initialization
+    const suiClient = getSuiClient();
+
+    if (!suiClient) {
+        throw new Error('SuiClient is undefined before SealClient init');
+    }
+
+    console.log('[SEAL Debug] Passing SuiClient to SealClient:', !!suiClient, 'Has getObject:', typeof suiClient.getObject);
+
+    // WRAPPER FIX: SealClient expects client.core.getObject({ objectId: ... })
+    // But @mysten/sui SDK expects client.getObject({ id: ... })
+    // We must intercept the call and map the arguments.
+    const wrappedClient = new Proxy(suiClient, {
+        get(target, prop) {
+            // SealClient accesses client.core
+            if (prop === 'core') {
+                return new Proxy(target, {
+                    get(coreTarget, coreProp) {
+                        // Intercept getObject to fix argument mismatch AND response structure
+                        if (coreProp === 'getObject') {
+                            return async (args: any) => {
+                                // 1. Map arguments (objectId -> id)
+                                if (args && args.objectId && !args.id) {
+                                    console.log('[SEAL Debug] Patching getObject args: objectId -> id');
+                                    args = { ...args, id: args.objectId };
+                                }
+                                
+                                // 2. Force showBcs: true to get the raw bytes SealClient needs
+                                args = {
+                                    ...args,
+                                    options: {
+                                        ...args.options,
+                                        showBcs: true,
+                                    }
+                                };
+
+                                // 3. Call original method
+                                const result = await (coreTarget as any).getObject(args);
+
+                                // 4. Map response (data -> object) and inject content
+                                // SealClient expects response.object.content to be the BCS bytes (Uint8Array)
+                                if (result && result.data && !result.object) {
+                                    console.log('[SEAL Debug] Patching getObject result: data -> object (with BCS)');
+                                    
+                                    const patchedObject = { ...result.data };
+                                    
+                                    // Map bcsBytes to content if available
+                                    if (result.data.bcs && result.data.bcs.bcsBytes) {
+                                        // We need to convert base64 to Uint8Array
+                                        // Using built-in Buffer or a helper if available. 
+                                        // Since we are in browser/node env, we can use fromBase64 from @mysten/sui/utils if imported, 
+                                        // or just use atob/Uint8Array for browser compatibility.
+                                        // Let's use fromBase64 from @mysten/sui/utils which is already imported? 
+                                        // No, only fromHEX is imported. Let's add fromBase64 import or use a simple conversion.
+                                        // Actually, let's use the fromBase64 from @mysten/bcs which is standard in Sui projects, 
+                                        // but I don't want to add a new import if I can avoid it.
+                                        // Let's check imports.
+                                        
+                                        try {
+                                            const binaryString = atob(result.data.bcs.bcsBytes);
+                                            const bytes = new Uint8Array(binaryString.length);
+                                            for (let i = 0; i < binaryString.length; i++) {
+                                                bytes[i] = binaryString.charCodeAt(i);
+                                            }
+                                            patchedObject.content = bytes;
+                                        } catch (e) {
+                                            console.error('[SEAL Debug] Failed to decode BCS bytes:', e);
+                                        }
+                                    }
+
+                                    return { ...result, object: patchedObject };
+                                }
+                                return result;
+                            };
+                        }
+                        // Pass through other properties
+                        return (coreTarget as any)[coreProp];
+                    }
+                });
+            }
+            return (target as any)[prop];
+        }
     });
+
+    try {
+        sealClientInstance = new SealClient({
+            suiClient: wrappedClient as any,
+            serverConfigs: SEAL_KEY_SERVERS_TESTNET.map(server => ({
+                objectId: server.objectId,
+                weight: server.weight,
+            })),
+            verifyKeyServers: false,
+        });
+
+        console.log('[SEAL Debug] SealClient initialized successfully');
+    } catch (e) {
+        console.error('[SEAL Debug] Failed to initialize SealClient:', e);
+        throw e;
+    }
 
     return sealClientInstance;
 }
@@ -70,12 +174,17 @@ export async function encryptMessage(
         const encoder = new TextEncoder();
         const data = encoder.encode(content);
 
-        console.log(`[SEAL] Encrypting message ${messageId}...`);
+        const normalizedPackageId = normalizeSuiAddress(PACKAGE_ID);
+        const normalizedMessageId = normalizeSuiAddress(messageId);
+
+        console.log(`[SEAL] Encrypting message...`);
+        console.log(`[SEAL] Package ID: ${normalizedPackageId}`);
+        console.log(`[SEAL] Message ID: ${normalizedMessageId}`);
 
         const { encryptedObject, key } = await client.encrypt({
             threshold: SEAL_THRESHOLD,
-            packageId: PACKAGE_ID,
-            id: messageId,
+            packageId: normalizedPackageId,
+            id: normalizedMessageId,
             data,
         } as any); // Type assertion needed - SDK expects proper encoding
 

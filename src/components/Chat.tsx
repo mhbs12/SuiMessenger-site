@@ -448,14 +448,23 @@ export function Chat() {
     });
 
     signAndExecute({
-      transaction: tx,
+      transaction: tx as any,
     }, {
       onSuccess: () => {
-        console.log("Messages marked as read");
-        setTimeout(() => {
-          refetchChats();
-          refetchMessages();
-        }, 1000);
+        console.log("Marked as read successfully");
+        // Update local state to reflect read status
+        setReadMessageIds(prev => {
+          const next = new Set(prev);
+          unreadMsgs.forEach(msg => next.add(msg.data!.objectId));
+          return next;
+        });
+        // Decrement unread count
+        if (selectedContact) {
+          setUnreadCounts(prev => ({
+            ...prev,
+            [selectedContact.toLowerCase()]: 0
+          }));
+        }
       },
       onError: (err) => console.error("Failed to mark as read:", err)
     });
@@ -632,7 +641,7 @@ export function Chat() {
 
       setSendingStatus('Opening wallet...');
       signAndExecute({
-        transaction: tx,
+        transaction: tx as any,
       }, {
         onSuccess: () => {
           setSendingStatus('');

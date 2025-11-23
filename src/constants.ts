@@ -1,6 +1,14 @@
-export const NETWORK = import.meta.env.VITE_SUI_NETWORK as keyof typeof SUI_NETWORKS || 'testnet';
-export const PACKAGE_ID = import.meta.env.VITE_PACKAGE_ID;
-export const CHAT_REGISTRY_ID = import.meta.env.VITE_CHAT_REGISTRY_ID;
+// Force ignore the old package ID if it's still in env
+const ENV_PACKAGE_ID = import.meta.env.VITE_PACKAGE_ID;
+const OLD_PACKAGE_ID = '0xb8d77645e10d4025d851be813433dab5c4b1fa3963f8710252dd38a93611bfbb';
+
+export const PACKAGE_ID = (ENV_PACKAGE_ID && ENV_PACKAGE_ID !== OLD_PACKAGE_ID)
+    ? ENV_PACKAGE_ID
+    : '0xe4adcf1062f06848fb04f669e2064719a2614f6dc2cbe138a4be6d1c5f012f84';
+
+export const CHAT_REGISTRY_ID = import.meta.env.VITE_CHAT_REGISTRY_ID || '0x1dbe592ef8def8a043b254a64765fec3e133bba0c3acd220820e58f5545e1fe3';
+
+export const NETWORK = import.meta.env.VITE_SUI_NETWORK || 'testnet';
 
 export const SUI_NETWORKS = {
     testnet: { url: 'https://fullnode.testnet.sui.io:443' },
