@@ -2,16 +2,31 @@ import { useState, useMemo, useEffect, useRef } from 'react';
 import { useCurrentAccount, useSuiClientQuery, useSignAndExecuteTransaction, ConnectButton, useSuiClient } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
 import { PACKAGE_ID, CHAT_REGISTRY_ID } from '../constants';
-import { MessageSquare, Send, Search, MoreVertical, PlusCircle, RefreshCw, Clock, Sun, Moon, CheckCheck } from 'lucide-react';
+import { MessageSquare, Send, Search, MoreVertical, PlusCircle, RefreshCw, Clock, Sun, Moon, CheckCheck, Copy } from 'lucide-react';
 import { uploadToWalrus, downloadFromWalrus } from '../utils/walrus';
-import { calculateContentHash, encryptMessage } from '../utils/crypto';
+import { calculateContentHash, encryptMessage, decryptMessage } from '../utils/crypto';
+import { useSealSession } from '../hooks/useSealSession';
 import { useTheme } from '../context/ThemeContext';
+import { ReadReceipt } from './ReadReceipt';
+import { bcs } from '@mysten/sui/bcs';
+import { fromHex, toHex, normalizeSuiAddress } from '@mysten/sui/utils';
+
+// Define BCS types explicitly to ensure control
+const Address = bcs.bytes(32).transform({
+  input: (val: string) => fromHex(val),
+  output: (val) => toHex(val),
+});
+const ParticipantsKey = bcs.vector(Address);
 
 export function Chat() {
   const account = useCurrentAccount();
-  const client = useSuiClient();
+  const suiClient = useSuiClient();
   const { mutate: signAndExecute } = useSignAndExecuteTransaction();
   const { theme, toggleTheme } = useTheme();
+
+  // SEAL Session Management
+  const { sessionKey, isReady: isSessionReady } = useSealSession();
+
   const [selectedContact, setSelectedContact] = useState<string | null>(null);
   const [messageText, setMessageText] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
@@ -28,6 +43,7 @@ export function Chat() {
   const [chatIds, setChatIds] = useState<Record<string, string>>({});
   // Map of Contact Address -> Unread Count
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [readMessageIds, setReadMessageIds] = useState<Set<string>>(new Set());
 
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -63,11 +79,13 @@ export function Chat() {
 
     chatEvents.data.forEach((event: any) => {
       const parsed = event.parsedJson;
-      const participants = parsed.participants as string[];
+      // Normalize to lowercase
+      const participants = (parsed.participants as string[]).map(p => p.toLowerCase());
+      const myAddress = account.address.toLowerCase();
 
-      if (participants.includes(account.address)) {
+      if (participants.includes(myAddress)) {
         // Find the other party
-        const otherParty = participants.find(p => p !== account.address);
+        const otherParty = participants.find(p => p !== myAddress);
         if (otherParty) {
           newChatIds[otherParty] = parsed.id;
         }
@@ -96,15 +114,18 @@ export function Chat() {
       if (!obj.data || !obj.data.content) return;
 
       const fields = obj.data.content.fields;
-      const participants = fields.participants as string[];
+      const participants = (fields.participants as string[]).map(p => p.toLowerCase());
       const unreadMap = fields.unread_counts.fields.contents; // VecMap structure
+      const myAddress = account.address.toLowerCase();
 
       // Find other party
-      const otherParty = participants.find(p => p !== account.address);
+      const otherParty = participants.find(p => p !== myAddress);
       if (!otherParty) return;
 
       // Find my unread count
-      const myEntry = unreadMap.find((entry: any) => entry.fields.key === account.address);
+      // Note: VecMap keys might not be normalized in the response, but usually are.
+      // We should check both or normalize if possible.
+      const myEntry = unreadMap.find((entry: any) => entry.fields.key.toLowerCase() === myAddress);
       if (myEntry) {
         newUnreadCounts[otherParty] = Number(myEntry.fields.value);
       }
@@ -124,6 +145,45 @@ export function Chat() {
     enabled: !!account,
     refetchInterval: 3000,
   });
+
+  // 4. Query MessageReadSimple Events
+  const { data: readEvents } = useSuiClientQuery('queryEvents', {
+    query: {
+      MoveEventType: `${PACKAGE_ID}::events::MessageReadSimple`,
+    },
+    limit: 100,
+    order: 'descending',
+  }, {
+    enabled: !!account,
+    refetchInterval: 3000,
+  });
+
+  // Process Read Events
+  useEffect(() => {
+    if (!readEvents?.data) return;
+
+    setReadMessageIds(prev => {
+      const next = new Set(prev);
+      let hasChanges = false;
+      readEvents.data.forEach((event: any) => {
+        const parsed = event.parsedJson;
+        console.log("Processing Read Event:", parsed); // DEBUG LOG
+        if (parsed) {
+          // Handle both direct ID string and { id: string } object format
+          const rawId = parsed.message_id;
+          const messageId = typeof rawId === 'object' && rawId !== null && 'id' in rawId ? rawId.id : rawId;
+
+          console.log("Extracted Message ID:", messageId); // DEBUG LOG
+
+          if (messageId && !next.has(messageId)) {
+            next.add(messageId);
+            hasChanges = true;
+          }
+        }
+      });
+      return hasChanges ? next : prev;
+    });
+  }, [readEvents]);
 
 
   // Conversations Grouping
@@ -193,19 +253,62 @@ export function Chat() {
   // Decrypt Messages
   useEffect(() => {
     const fetchMessages = async () => {
-      if (!activeMessages.length) return;
+      if (!activeMessages.length || !account) return;
+
+      // Wait for session key if not ready yet
+      if (!sessionKey && isSessionReady === false) {
+        console.log('[SEAL] Waiting for session key...');
+        return;
+      }
 
       activeMessages.forEach(async (msg: any) => {
-        const msgId = (typeof msg.id === 'string' ? msg.id : msg.id?.id) || msg.walrus_blob_id;
+        // Fix: Match the ID logic used in the render loop
+        const rawMsgId = msg.message_id || msg.id;
+        const msgId = (typeof rawMsgId === 'string' ? rawMsgId : rawMsgId?.id) || msg.walrus_blob_id;
+
         if (!msgId || decryptedMessages[msgId]) return;
 
         if (msg.walrus_blob_id) {
           try {
+            // Download encrypted content from Walrus
             const encryptedContent = await downloadFromWalrus(msg.walrus_blob_id);
-            setDecryptedMessages(prev => ({
-              ...prev,
-              [msgId]: encryptedContent
-            }));
+
+            // Decrypt with SEAL if we have a session key
+            if (sessionKey && chatIds[selectedContact?.toLowerCase() || '']) {
+              try {
+                const chatId = chatIds[selectedContact!.toLowerCase()];
+                const isSender = msg.sender?.toLowerCase() === account.address.toLowerCase();
+
+                console.log(`[SEAL] Decrypting message ${msgId} (${isSender ? 'sender' : 'receiver'})`);
+
+                const decryptedText = await decryptMessage(
+                  encryptedContent,
+                  msgId,
+                  chatId,
+                  sessionKey,
+                  isSender
+                );
+
+                setDecryptedMessages(prev => ({
+                  ...prev,
+                  [msgId]: decryptedText
+                }));
+              } catch (decryptError) {
+                console.error(`[SEAL] Decryption failed for ${msgId}:`, decryptError);
+                // Fallback: show encrypted content (shouldn't happen in normal flow)
+                setDecryptedMessages(prev => ({
+                  ...prev,
+                  [msgId]: encryptedContent
+                }));
+              }
+            } else {
+              // No session key yet or no chat ID - store encrypted for now
+              console.warn(`[SEAL] Cannot decrypt ${msgId}: missing session key or chat ID`);
+              setDecryptedMessages(prev => ({
+                ...prev,
+                [msgId]: "🔒 Creating secure session..."
+              }));
+            }
           } catch (e) {
             console.error(`Failed to load message ${msgId}:`, e);
             setDecryptedMessages(prev => ({
@@ -217,7 +320,7 @@ export function Chat() {
       });
     };
     fetchMessages();
-  }, [activeMessages, decryptedMessages]);
+  }, [activeMessages, decryptedMessages, sessionKey, isSessionReady, account, chatIds, selectedContact]);
 
   // Remove Optimistic Messages
   useEffect(() => {
@@ -276,7 +379,7 @@ export function Chat() {
   useEffect(() => {
     const fetchEpochDuration = async () => {
       try {
-        const state = await client.getLatestSuiSystemState();
+        const state = await suiClient.getLatestSuiSystemState();
         const duration = Number(state.epochDurationMs);
         if (!isNaN(duration) && duration > 0) {
           setEpochDuration(duration);
@@ -286,7 +389,7 @@ export function Chat() {
       }
     };
     fetchEpochDuration();
-  }, [client]);
+  }, [suiClient]);
 
   const expirationDate = useMemo(() => {
     const date = new Date();
@@ -315,7 +418,7 @@ export function Chat() {
     // We can query owned messages.
 
     // Fetch owned messages for this contact
-    const owned = await client.getOwnedObjects({
+    const owned = await suiClient.getOwnedObjects({
       owner: account!.address,
       filter: { StructType: `${PACKAGE_ID}::message::Message` },
       options: { showContent: true }
@@ -358,10 +461,86 @@ export function Chat() {
     });
   };
 
+  const fetchChatId = async (contactAddress: string): Promise<string | null> => {
+    if (!account) return null;
+
+    console.log("Fetching Chat ID from Registry:", CHAT_REGISTRY_ID);
+
+    try {
+      // 1. Get the Table ID from the Registry Object
+      const registryObj = await suiClient.getObject({
+        id: CHAT_REGISTRY_ID,
+        options: { showContent: true }
+      });
+
+      if (!registryObj.data || !registryObj.data.content) {
+        console.error("Registry object not found");
+        return null;
+      }
+
+      if (registryObj.data.content.dataType !== 'moveObject') {
+        console.error("Registry object is not a Move Object");
+        return null;
+      }
+
+      const registryFields = registryObj.data.content.fields as any;
+      // The 'chats' field contains the Table struct, which has an 'id' field
+      const tableId = registryFields.chats.fields.id.id;
+
+      console.log("Found Table ID:", tableId);
+
+      const addr1 = normalizeSuiAddress(account.address);
+      const addr2 = normalizeSuiAddress(contactAddress);
+
+      // Sort addresses byte-wise
+      const b1 = fromHex(addr1);
+      const b2 = fromHex(addr2);
+
+      let sorted = [addr1, addr2];
+      for (let i = 0; i < b1.length; i++) {
+        if (b1[i] < b2[i]) {
+          sorted = [addr1, addr2];
+          break;
+        }
+        if (b1[i] > b2[i]) {
+          sorted = [addr2, addr1];
+          break;
+        }
+      }
+
+      // Encode key
+      const keyBytes = ParticipantsKey.serialize(sorted).toBytes();
+      const keyArray = Array.from(keyBytes);
+
+      console.log("Looking up key in Table:", tableId);
+
+      // 2. Query the Table Object (using the extracted Table ID)
+      const response = await suiClient.getDynamicFieldObject({
+        parentId: tableId, // Use Table ID, not Registry ID
+        name: {
+          type: 'vector<u8>',
+          value: keyArray
+        }
+      });
+
+      if (response.data?.content && 'fields' in response.data.content) {
+        const fields = response.data.content.fields as any;
+        console.log("Found Chat ID via Table lookup:", fields.value);
+        return fields.value;
+      }
+
+      return null;
+    } catch (e) {
+      console.error("Error fetching chat ID:", e);
+      return null;
+    }
+  };
+
   const handleSendMessage = async () => {
     if (!messageText || !selectedContact || !account) return;
 
     const optimisticId = `temp_${Date.now()}`;
+    // ... (optimistic update logic remains same)
     const optimisticMsg = {
       id: { id: optimisticId },
       sender: account.address,
@@ -383,8 +562,14 @@ export function Chat() {
     setIsSending(true);
 
     try {
+      // Generate message ID for SEAL encryption
+      // SEAL needs the ID before encryption to bind the policy
+      const tempMessageId = `0x${Array.from(crypto.getRandomValues(new Uint8Array(32)))
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('')}`;
+
       setSendingStatus('Encrypting message...');
-      const { encryptedContent, sealPolicyId } = await encryptMessage(messageToSend, selectedContact);
+      const { encryptedContent } = await encryptMessage(messageToSend, tempMessageId);
 
       setSendingStatus('Uploading to Walrus...');
       const { blobId } = await uploadToWalrus(encryptedContent, epochs);
@@ -398,7 +583,20 @@ export function Chat() {
       const contentHash = calculateContentHash(encryptedContent);
 
       const tx = new Transaction();
-      const chatId = chatIds[selectedContact];
+      // Normalize lookup
+      let chatId = chatIds[selectedContact.toLowerCase()];
+
+      // Fallback: Query Registry if not found in local state
+      if (!chatId) {
+        console.log("Chat ID not found in state, querying registry...");
+        const fetchedId = await fetchChatId(selectedContact);
+        if (fetchedId) {
+          console.log("Found Chat ID in registry:", fetchedId);
+          chatId = fetchedId;
+          // Update local state
+          setChatIds(prev => ({ ...prev, [selectedContact.toLowerCase()]: fetchedId }));
+        }
+      }
 
       if (chatId) {
         // Existing Chat: use send_message
@@ -409,9 +607,9 @@ export function Chat() {
             tx.pure.address(selectedContact),
             tx.pure.string(blobId),
             tx.pure.vector('u8', Array.from(contentHash)),
-            tx.pure.vector('u8', []),
-            tx.pure.option('address', sealPolicyId ? sealPolicyId : null),
-            tx.object('0x6'),
+            tx.pure.vector('u8', []), // encrypted_metadata (empty for now)
+            tx.pure.option('address', null), // seal_policy_id (SEAL handles this now)
+            tx.object('0x6'), // clock
           ],
         });
       } else {
@@ -425,9 +623,9 @@ export function Chat() {
             tx.pure.address(selectedContact),
             tx.pure.string(blobId),
             tx.pure.vector('u8', Array.from(contentHash)),
-            tx.pure.vector('u8', []),
-            tx.pure.option('address', sealPolicyId ? sealPolicyId : null),
-            tx.object('0x6'),
+            tx.pure.vector('u8', []), // encrypted_metadata (empty for now)
+            tx.pure.option('address', null), // seal_policy_id (SEAL handles this now)
+            tx.object('0x6'), // clock
           ],
         });
       }
@@ -492,6 +690,12 @@ export function Chat() {
     }
   };
 
+  const handleCopy = (text: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    navigator.clipboard.writeText(text);
+    alert('Address copied to clipboard!');
+  };
+
   return (
     <div className="flex h-full w-full bg-[var(--sui-bg)] overflow-hidden">
       {/* SIDEBAR */}
@@ -500,6 +704,15 @@ export function Chat() {
         <div className="h-[60px] px-4 bg-[var(--sui-bg-tertiary)] flex justify-between items-center shrink-0 border-b border-[var(--sui-border)]">
           <div className="flex items-center gap-3 wallet-btn-container">
             <ConnectButton />
+            {account && (
+              <button
+                onClick={(e) => handleCopy(account.address, e)}
+                className="p-2 hover:bg-[var(--sui-bg-secondary)] rounded-full transition-colors text-[var(--sui-text-secondary)] hover:text-[var(--sui-blue)]"
+                title="Copy My Address"
+              >
+                <Copy size={18} />
+              </button>
+            )}
           </div>
           <div className="flex gap-3 text-[var(--sui-text-secondary)] items-center">
             <button
@@ -569,7 +782,11 @@ export function Chat() {
               </div>
               <div className="flex-1 min-w-0">
                 <div className="flex justify-between items-baseline">
-                  <h3 className="text-[var(--sui-text)] font-semibold truncate">
+                  <h3
+                    className="text-[var(--sui-text)] font-semibold truncate cursor-pointer hover:text-[var(--sui-blue)] transition-colors"
+                    onClick={(e) => handleCopy(contact.address, e)}
+                    title="Click to copy address"
+                  >
                     {formatAddress(contact.address)}
                   </h3>
                   <div className="flex flex-col items-end gap-1">
@@ -604,7 +821,14 @@ export function Chat() {
                   <MessageSquare size={20} className="text-white" />
                 </div>
                 <div>
-                  <h2 className="text-[var(--sui-text)] font-semibold">{formatAddress(selectedContact)}</h2>
+                  <h2
+                    className="text-[var(--sui-text)] font-semibold cursor-pointer hover:text-[var(--sui-blue)] transition-colors flex items-center gap-2"
+                    onClick={(e) => handleCopy(selectedContact, e)}
+                    title="Click to copy address"
+                  >
+                    {formatAddress(selectedContact)}
+                    <Copy size={14} className="opacity-50" />
+                  </h2>
                   <p className="text-xs text-[var(--sui-text-secondary)]">Online</p>
                 </div>
               </div>
@@ -630,7 +854,10 @@ export function Chat() {
               className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar relative"
             >
               {[...activeMessages].reverse().map((msg: any, index: number) => {
-                const msgId = (typeof msg.id === 'string' ? msg.id : msg.id?.id) || msg.walrus_blob_id || `msg-${index}`;
+                // Fix: Check for message_id first (from Event), then id (from Optimistic), then fallback
+                const rawMsgId = msg.message_id || msg.id;
+                const msgId = (typeof rawMsgId === 'string' ? rawMsgId : rawMsgId?.id) || msg.walrus_blob_id || `msg-${index}`;
+
                 const uniqueKey = `${msgId}-${index}`;
                 const content = decryptedMessages[msgId];
                 const isError = content === "⚠️ Failed to load content";
@@ -680,6 +907,9 @@ export function Chat() {
                           </svg>
                         )}
                         {formatTime(msg.timestamp)}
+                        {msg.isSender && (
+                          <ReadReceipt isRead={readMessageIds.has(msgId) || msg.is_read} />
+                        )}
                       </div>
                     </div>
                   </div>
@@ -691,7 +921,7 @@ export function Chat() {
                 <button
                   onClick={scrollToBottom}
                   className="fixed bottom-24 right-8 sui-gradient text-white p-3 rounded-full shadow-2xl hover:scale-110 transition-transform z-10 glow-effect"
-                  title="Ir para mensagens recentes"
+                  title="Go to recent messages"
                 >
                   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />

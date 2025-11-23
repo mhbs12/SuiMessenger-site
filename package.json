@@ -13,11 +13,13 @@
     },
     "dependencies": {
         "@mysten/dapp-kit": "^0.14.0",
+        "@mysten/seal": "^0.9.4",
         "@mysten/sui.js": "^0.51.0",
         "@mysten/walrus": "^0.8.4",
         "@noble/hashes": "^2.0.1",
         "@tanstack/react-query": "^5.0.0",
         "clsx": "^2.0.0",
+        "framer-motion": "^12.23.24",
         "lucide-react": "^0.300.0",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
