@@ -60,6 +60,21 @@ npm run build
 npm run preview
 ```
 
+## 📝 Notas
+
+1.  **Variáveis de Ambiente:** Não esqueça de adicionar todas as variáveis `VITE_*` no dashboard da Vercel
+
+2.  **Swap Temporariamente Desabilitado:** O módulo `swap.ts` está comentado (`aftermath-ts-sdk` foi removido devido a conflito de peer dependencies com `@mysten/sui@1.45.0`). Para habilitar quando houver compatibilidade:
+    ```bash
+    npm install aftermath-ts-sdk
+    ```
+
+3.  **Build OK:** O projeto compila sem erros ✅
+
+4.  **GitHub Atualizado:** Mudanças já estão no repo
+
+> **Importante para Vercel**: O `package-lock.json` foi regenerado sem `aftermath-ts-sdk` para evitar conflitos de peer dependency durante o deploy.
+
 ## 📦 Variáveis de Ambiente
 
 Copie `.env.example` para `.env` e preencha:
