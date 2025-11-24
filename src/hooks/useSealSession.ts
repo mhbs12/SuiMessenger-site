@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useCurrentAccount, useSuiClient } from '@mysten/dapp-kit';
+import { useCurrentAccount } from '@mysten/dapp-kit';
 import { SessionKey } from '@mysten/seal';
 import { getSealCompatibleClient } from '../utils/crypto';
 
@@ -8,6 +8,7 @@ interface UseSealSessionReturn {
     isReady: boolean;
     isLoading: boolean;
     error: string | null;
+    expirationTimeMs: number | null;
     refresh: () => void;
     saveSession: (key: SessionKey) => void;
 }
@@ -23,11 +24,11 @@ const SESSION_STORAGE_KEY = 'seal_session_data';
  */
 export function useSealSession(): UseSealSessionReturn {
     const account = useCurrentAccount();
-    const suiClient = useSuiClient(); // Get client from context
     const [sessionKey, setSessionKey] = useState<SessionKey | null>(null);
     const [isReady, setIsReady] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(true);
+    const [expirationTimeMs, setExpirationTimeMs] = useState<number | null>(null);
 
     const loadSession = () => {
         console.log('[SEAL Hook] loadSession called');
@@ -72,6 +73,11 @@ export function useSealSession(): UseSealSessionReturn {
                     } else {
                         setSessionKey(parsedSession);
                         setIsReady(true);
+                        // Calculate expiration: creationTime + (ttlMin * 60 * 1000)
+                        const exported = parsedSession.export();
+                        const creation = Number(exported.creationTimeMs);
+                        const ttl = Number(exported.ttlMin);
+                        setExpirationTimeMs(creation + (ttl * 60 * 1000));
                         console.log('[SEAL Session] Loaded from localStorage');
                     }
                 } catch (importError) {
@@ -122,6 +128,10 @@ export function useSealSession(): UseSealSessionReturn {
             // Update state immediately
             setSessionKey(key);
             setIsReady(true);
+            // exported is already defined above
+            const creation = Number(exported.creationTimeMs);
+            const ttl = Number(exported.ttlMin);
+            setExpirationTimeMs(creation + (ttl * 60 * 1000));
             console.log('[SEAL Hook] State updated with new key');
         } catch (error) {
             console.error('[SEAL Session] Failed to save session:', error);
@@ -132,6 +142,7 @@ export function useSealSession(): UseSealSessionReturn {
         localStorage.removeItem(SESSION_STORAGE_KEY);
         setSessionKey(null);
         setIsReady(false);
+        setExpirationTimeMs(null);
         setError(null);
         loadSession();
     };
@@ -140,11 +151,26 @@ export function useSealSession(): UseSealSessionReturn {
         loadSession();
     }, [account?.address]);
 
+    // Auto-expire check
+    useEffect(() => {
+        if (!expirationTimeMs || !isReady) return;
+
+        const interval = setInterval(() => {
+            if (Date.now() > expirationTimeMs) {
+                console.warn('[SEAL Session] Session expired during usage');
+                refresh();
+            }
+        }, 1000);
+
+        return () => clearInterval(interval);
+    }, [expirationTimeMs, isReady]);
+
     return {
         sessionKey,
         isReady,
         isLoading,
         error,
+        expirationTimeMs,
         refresh,
         saveSession, // Expose this
     };

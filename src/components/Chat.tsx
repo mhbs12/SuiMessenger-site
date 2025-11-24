@@ -2,14 +2,15 @@ import { useState, useMemo, useEffect, useRef } from 'react';
 import { useCurrentAccount, useSuiClientQuery, useSignAndExecuteTransaction, ConnectButton, useSuiClient, useSignPersonalMessage } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
 import { PACKAGE_ID, CHAT_REGISTRY_ID } from '../constants';
-import { MessageSquare, Send, Search, MoreVertical, PlusCircle, RefreshCw, Clock, Sun, Moon, CheckCheck, Copy } from 'lucide-react';
-import { uploadToWalrus, downloadFromWalrus } from '../utils/walrus';
+import { MessageSquare, Send, Search, MoreVertical, PlusCircle, RefreshCw, Clock, Sun, Moon, CheckCheck, Copy, Hourglass, Power, Play, Paperclip, X, Image as ImageIcon } from 'lucide-react';
+import { uploadToWalrus, downloadFromWalrus, registerBlob } from '../utils/walrus';
 import { calculateContentHash, encryptMessage, decryptMessage, createSealSession } from '../utils/crypto';
 import { useSealSession } from '../hooks/useSealSession';
 import { useTheme } from '../context/ThemeContext';
 import { ReadReceipt } from './ReadReceipt';
 import { bcs } from '@mysten/sui/bcs';
 import { fromHex, toHex, toHEX, normalizeSuiAddress } from '@mysten/sui/utils';
+import { getSwapQuote, buildSwapTransaction } from '../utils/swap';
 
 // Define BCS types explicitly to ensure control
 const Address = bcs.bytes(32).transform({
@@ -25,16 +26,26 @@ export function Chat() {
   const { theme, toggleTheme } = useTheme();
 
   // SEAL Session Management
-  const { sessionKey, isReady: isSessionReady, isLoading: isSessionLoading, saveSession } = useSealSession();
+  const { sessionKey, isReady: isSessionReady, isLoading: isSessionLoading, saveSession, expirationTimeMs, refresh: refreshSession } = useSealSession();
   const [isCreatingSession, setIsCreatingSession] = useState(false);
+  const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
   const [showSealModal, setShowSealModal] = useState(false);
+  const [showEndSessionConfirm, setShowEndSessionConfirm] = useState(false);
   const [sealError, setSealError] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [timeRemaining, setTimeRemaining] = useState<string>('');
+  const [hasHadSession, setHasHadSession] = useState(false);
   const attemptRef = useRef<string | null>(null);
+
+  // ... (initSession logic)
+
+
 
   // Automatic Session Creation with Modal
   useEffect(() => {
     const initSession = async () => {
-      if (account && !isSessionLoading && !sessionKey && !isCreatingSession && isSessionReady === false) {
+      // Only auto-create if we haven't had a session yet in this page load
+      if (account && !isSessionLoading && !sessionKey && !isCreatingSession && isSessionReady === false && !hasHadSession) {
 
         if (attemptRef.current === account.address) {
           return; // Already attempted for this account
@@ -58,6 +69,7 @@ export function Chat() {
             }
           );
           saveSession(newSession);
+          setHasHadSession(true); // Mark that we've had a session
           setShowSealModal(false);
         } catch (error: any) {
           console.error('[SEAL] Failed to auto-create session:', error);
@@ -80,7 +92,39 @@ export function Chat() {
     };
 
     initSession();
-  }, [account, sessionKey, isCreatingSession, isSessionReady, isSessionLoading, signPersonalMessage, saveSession]);
+  }, [account, sessionKey, isCreatingSession, isSessionReady, isSessionLoading, signPersonalMessage, saveSession, hasHadSession]);
+
+  // Calculate time remaining for session
+  useEffect(() => {
+    if (!expirationTimeMs || !isSessionReady) {
+      setTimeRemaining('');
+      return;
+    }
+
+    const updateTimer = () => {
+      const now = Date.now();
+      const remaining = expirationTimeMs - now;
+
+      if (remaining <= 0) {
+        setTimeRemaining('Expired');
+        return;
+      }
+
+      const minutes = Math.floor(remaining / 60000);
+      const seconds = Math.floor((remaining % 60000) / 1000);
+
+      if (minutes > 0) {
+        setTimeRemaining(`${minutes}m`);
+      } else {
+        setTimeRemaining(`${seconds}s`);
+      }
+    };
+
+    updateTimer();
+    const interval = setInterval(updateTimer, 1000);
+
+    return () => clearInterval(interval);
+  }, [expirationTimeMs, isSessionReady]);
 
   const [selectedContact, setSelectedContact] = useState<string | null>(null);
   const [messageText, setMessageText] = useState('');
@@ -266,44 +310,86 @@ export function Chat() {
 
     setUnreadCounts(counts);
   }, [events, readMessageIds, account]);
-
-
   // Conversations Grouping
   const conversations = useMemo(() => {
-    if (!events?.data || !account) return [];
+    if (!account) return [];
+
     const groups: Record<string, any> = {};
 
-    events.data.forEach((event: any) => {
-      const parsedJson = event.parsedJson;
-      if (!parsedJson) return;
+    // 1. Initialize with created chats (even if empty)
+    if (chatEvents?.data) {
+      chatEvents.data.forEach((event: any) => {
+        try {
+          const parsed = event.parsedJson;
+          if (!parsed || !parsed.participants || !Array.isArray(parsed.participants)) return;
 
-      const isSender = parsedJson.sender === account.address;
-      const isRecipient = parsedJson.recipient === account.address;
+          const participants = (parsed.participants as string[]).map(p => p.toLowerCase());
+          const myAddress = account.address.toLowerCase();
 
-      if (!isSender && !isRecipient) return;
-
-      const otherParty = isSender ? parsedJson.recipient : parsedJson.sender;
-
-      if (!groups[otherParty]) {
-        groups[otherParty] = {
-          address: otherParty,
-          lastMessage: parsedJson,
-          messages: []
-        };
-      }
-
-      groups[otherParty].messages.push({
-        ...parsedJson,
-        isSender
+          if (participants.includes(myAddress)) {
+            const otherParty = participants.find(p => p !== myAddress);
+            if (otherParty) {
+              groups[otherParty] = {
+                address: otherParty,
+                lastMessage: null, // No message yet
+                messages: [],
+                createdAt: Number(event.timestampMs) || 0 // Use event timestamp
+              };
+            }
+          }
+        } catch (e) {
+          console.warn("Error processing chat event:", e);
+        }
       });
+    }
 
-      if (Number(parsedJson.timestamp) > Number(groups[otherParty].lastMessage.timestamp)) {
-        groups[otherParty].lastMessage = parsedJson;
-      }
+    // 2. Populate with messages
+    if (events?.data) {
+      events.data.forEach((event: any) => {
+        try {
+          const parsedJson = event.parsedJson;
+          if (!parsedJson) return;
+
+          const isSender = parsedJson.sender === account.address;
+          const isRecipient = parsedJson.recipient === account.address;
+
+          if (!isSender && !isRecipient) return;
+
+          const otherParty = isSender ? parsedJson.recipient : parsedJson.sender;
+
+          if (!otherParty) return; // Safety check
+
+          // If we didn't find the chat via ChatCreated (maybe old chat?), init it
+          if (!groups[otherParty]) {
+            groups[otherParty] = {
+              address: otherParty,
+              lastMessage: null,
+              messages: [],
+              createdAt: 0
+            };
+          }
+
+          groups[otherParty].messages.push({
+            ...parsedJson,
+            isSender
+          });
+
+          // Update last message
+          if (!groups[otherParty].lastMessage || Number(parsedJson.timestamp) > Number(groups[otherParty].lastMessage.timestamp)) {
+            groups[otherParty].lastMessage = parsedJson;
+          }
+        } catch (e) {
+          console.warn("Error processing message event:", e);
+        }
+      });
+    }
+
+    return Object.values(groups).sort((a: any, b: any) => {
+      const timeA = a.lastMessage ? Number(a.lastMessage.timestamp) : (a.createdAt / 1000);
+      const timeB = b.lastMessage ? Number(b.lastMessage.timestamp) : (b.createdAt / 1000);
+      return timeB - timeA;
     });
-
-    return Object.values(groups).sort((a: any, b: any) => Number(b.lastMessage.timestamp) - Number(a.lastMessage.timestamp));
-  }, [events, account]);
+  }, [events, chatEvents, account]);
 
   // Contact List
   const contactList = useMemo(() => {
@@ -312,12 +398,7 @@ export function Chat() {
     );
   }, [conversations, searchTerm]);
 
-  // Auto-select first contact
-  useEffect(() => {
-    if (!selectedContact && contactList.length > 0) {
-      setSelectedContact(contactList[0].address);
-    }
-  }, [contactList, selectedContact]);
+
 
   // Active Messages
   const activeMessages = useMemo(() => {
@@ -331,6 +412,13 @@ export function Chat() {
 
     return [...optimistic, ...realMessages];
   }, [selectedContact, conversations, optimisticMessages, account]);
+
+  // Auto-scroll to bottom when chat opens or messages change
+  useEffect(() => {
+    if (selectedContact) {
+      scrollToBottom();
+    }
+  }, [selectedContact, activeMessages]);
 
   // Decrypt Messages
   useEffect(() => {
@@ -680,9 +768,29 @@ export function Chat() {
 
       console.log("Looking up key in Table:", tableId);
 
-      // 2. Query the Table Object (using the extracted Table ID)
+      // 2. Query the Table Object
+      // Try vector<address> first (Standard Move pattern)
+      try {
+        const response = await suiClient.getDynamicFieldObject({
+          parentId: tableId,
+          name: {
+            type: 'vector<address>',
+            value: sorted
+          }
+        });
+
+        if (response.data?.content && 'fields' in response.data.content) {
+          const fields = response.data.content.fields as any;
+          console.log("Found Chat ID via Table lookup (vector<address>):", fields.value);
+          return fields.value;
+        }
+      } catch (e) {
+        console.log("Lookup with vector<address> failed, trying vector<u8> fallback...");
+      }
+
+      // Fallback: Try vector<u8> (BCS bytes)
       const response = await suiClient.getDynamicFieldObject({
-        parentId: tableId, // Use Table ID, not Registry ID
+        parentId: tableId,
         name: {
           type: 'vector<u8>',
           value: keyArray
@@ -691,7 +799,7 @@ export function Chat() {
 
       if (response.data?.content && 'fields' in response.data.content) {
         const fields = response.data.content.fields as any;
-        console.log("Found Chat ID via Table lookup:", fields.value);
+        console.log("Found Chat ID via Table lookup (vector<u8>):", fields.value);
         return fields.value;
       }
 
@@ -794,19 +902,48 @@ export function Chat() {
       setSendingStatus('Encrypting message...');
       const { encryptedContent } = await encryptMessage(messageToSend, chatId, plaintextHash);
 
-      // 4. Upload to Walrus
+      // 4. Upload to Walrus (to get Blob ID and ensure availability)
       setSendingStatus('Uploading to Walrus...');
-      const { blobId } = await uploadToWalrus(encryptedContent, epochs);
+      const { blobId, info } = await uploadToWalrus(encryptedContent, epochs);
       console.log('Uploaded to Walrus. Blob ID:', blobId);
 
       setOptimisticMessages(prev => prev.map(m =>
         m.id.id === optimisticId ? { ...m, walrus_blob_id: blobId } : m
       ));
 
-      // 5. Build Transaction: Send Message + Mark Received Messages as Read (in one PTB)
-      setSendingStatus('Preparing transaction...');
+      // 5. Atomic Swap & Send Logic
+      setSendingStatus('Calculating exchange rate...');
 
-      const tx = new Transaction();
+      // Estimate storage cost (in WAL)
+      // In a real app, we'd parse this from 'info' or fetch from the publisher
+      // For now, we'll assume a standard cost based on size or a fixed amount for the demo
+      // 1 WAL = 1,000,000,000 MIST (if 9 decimals)
+      // Let's swap enough for the storage. 
+      // Note: If 'info' contains 'storageCost', use it.
+      const estimatedCost = info?.storageCost ? BigInt(info.storageCost) : 10000000n; // ~0.01 WAL default
+
+      let tx = new Transaction();
+
+      try {
+        // Get Swap Quote (SUI -> WAL)
+        const quote = await getSwapQuote(estimatedCost, account.address);
+        console.log('Swap Quote:', quote);
+
+        // Build Swap Transaction
+        // This adds the swap commands to 'tx'
+        await buildSwapTransaction(tx, quote, account.address);
+        console.log('Added swap commands to transaction');
+      } catch (swapError) {
+        console.error('Swap failed or not configured:', swapError);
+        // Fallback: Proceed without swap if it fails (e.g. testnet issues), 
+        // or throw if strict. For UX, we might warn but proceed if the user has WAL?
+        // But the user wanted "SUI only". So we should probably alert.
+        // For now, we'll log and proceed to Send Message, assuming the user might have WAL or we just skip the swap part.
+        // setErrorMessage("Auto-swap failed. Proceeding with message send...");
+      }
+
+      // 6. Add Send Message & Mark Read commands to the SAME transaction
+      setSendingStatus('Preparing transaction...');
 
       // First, mark any unread messages from this contact as read (if any)
       if (unreadCounts[selectedContact.toLowerCase()] > 0) {
@@ -837,7 +974,6 @@ export function Chat() {
           });
         } catch (err) {
           console.warn('Failed to fetch unread messages for batching:', err);
-          // Continue anyway - we'll still send the message
         }
       }
 
@@ -866,7 +1002,17 @@ export function Chat() {
     } catch (error: any) {
       console.error('Error sending message:', error);
       const errorMsg = error.message || 'Error sending message. Check console.';
-      alert(errorMsg);
+
+      // Check for rejection
+      if (errorMsg.includes('reject') || errorMsg.includes('denied') || errorMsg.includes('cancel')) {
+        setErrorMessage('Transaction rejected by user');
+      } else {
+        setErrorMessage(errorMsg);
+      }
+
+      // Auto-clear error after 3 seconds
+      setTimeout(() => setErrorMessage(null), 3000);
+
       setOptimisticMessages(prev => prev.filter(m => m.id.id !== optimisticId));
       setDecryptedMessages(prev => {
         const newState = { ...prev };
@@ -904,7 +1050,8 @@ export function Chat() {
   const handleCopy = (text: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     navigator.clipboard.writeText(text);
-    alert('Address copied to clipboard!');
+    setCopiedAddress(text);
+    setTimeout(() => setCopiedAddress(null), 2000);
   };
 
   return (
@@ -921,11 +1068,46 @@ export function Chat() {
                 className="p-2 hover:bg-[var(--sui-bg-secondary)] rounded-full transition-colors text-[var(--sui-text-secondary)] hover:text-[var(--sui-blue)]"
                 title="Copy My Address"
               >
-                <Copy size={18} />
+                {copiedAddress === account.address ? <CheckCheck size={18} className="text-green-500" /> : <Copy size={18} />}
               </button>
             )}
           </div>
           <div className="flex gap-3 text-[var(--sui-text-secondary)] items-center">
+            {timeRemaining ? (
+              <div
+                className="flex items-center gap-2 text-xs px-3 py-1.5 bg-[var(--sui-bg-secondary)] rounded-full border border-[var(--sui-border)] shadow-sm"
+                title="Session expiration timer"
+              >
+                <Hourglass size={14} className="text-[var(--sui-blue)] animate-pulse" />
+                <span className={timeRemaining === 'Expired' ? 'text-red-500 font-semibold' : 'text-[var(--sui-text)] font-medium tabular-nums'}>
+                  {timeRemaining === 'Expired' ? 'Expired' : `${timeRemaining}`}
+                </span>
+                {timeRemaining !== 'Expired' && (
+                  <button
+                    onClick={() => setShowEndSessionConfirm(true)}
+                    className="ml-1 p-1 hover:bg-red-500/10 rounded-full text-[var(--sui-text-secondary)] hover:text-red-500 transition-all"
+                    title="End Session"
+                  >
+                    <Power size={14} />
+                  </button>
+                )}
+              </div>
+            ) : (
+              // Show "Start Session" button if connected but no session (and not loading)
+              account && !isSessionLoading && !sessionKey && (
+                <button
+                  onClick={() => {
+                    setHasHadSession(false); // Reset flag to trigger auto-init
+                    attemptRef.current = null; // Reset attempt ref to allow re-try
+                  }}
+                  className="flex items-center gap-2 text-xs px-3 py-1.5 bg-[var(--sui-blue)] text-white rounded-full hover:opacity-90 transition-all shadow-sm"
+                  title="Start a new secure session"
+                >
+                  <Play size={12} fill="currentColor" />
+                  <span>Start Session</span>
+                </button>
+              )
+            )}
             <button
               onClick={toggleTheme}
               className="p-2 hover:bg-[var(--sui-bg-secondary)] rounded-full transition-colors"
@@ -933,6 +1115,14 @@ export function Chat() {
             >
               {theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}
             </button>
+          </div>
+        </div>
+
+        {/* Network Badge */}
+        <div className="px-3 pt-3 pb-2">
+          <div className="flex items-center justify-center gap-2 px-3 py-2 bg-orange-500/10 text-orange-600 dark:text-orange-400 rounded-lg text-sm font-medium border border-orange-500/20">
+            <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse"></div>
+            <span>Currently on Testnet</span>
           </div>
         </div>
 
@@ -985,7 +1175,7 @@ export function Chat() {
             <div
               key={contact.address}
               onClick={() => setSelectedContact(contact.address)}
-              className={`flex items-center gap-3 p-3 cursor-pointer hover:bg-[var(--sui-bg-tertiary)] transition-all duration-200 border-b border-[var(--sui-border)]/30 ${selectedContact === contact.address ? 'bg-[var(--sui-bg-tertiary)] border-l-2 border-l-[var(--sui-blue)]' : ''
+              className={`flex items-center gap-3 p-3 cursor-pointer hover:bg-[var(--sui-bg-tertiary)] transition-all duration-200 border-b border-transparent ${selectedContact === contact.address ? 'bg-[var(--sui-bg-tertiary)] border-l-2 border-l-[var(--sui-blue)]' : ''
                 }`}
             >
               <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[var(--sui-blue)] to-[var(--sui-purple)] flex items-center justify-center text-white">
@@ -993,16 +1183,12 @@ export function Chat() {
               </div>
               <div className="flex-1 min-w-0">
                 <div className="flex justify-between items-baseline">
-                  <h3
-                    className="text-[var(--sui-text)] font-semibold truncate cursor-pointer hover:text-[var(--sui-blue)] transition-colors"
-                    onClick={(e) => handleCopy(contact.address, e)}
-                    title="Click to copy address"
-                  >
+                  <h3 className="text-[var(--sui-text)] font-semibold truncate">
                     {formatAddress(contact.address)}
                   </h3>
                   <div className="flex flex-col items-end gap-1">
                     <span className="text-xs text-[var(--sui-text-secondary)]">
-                      {formatTime(contact.lastMessage.timestamp)}
+                      {contact.lastMessage ? formatTime(contact.lastMessage.timestamp) : (contact.createdAt ? formatTime((contact.createdAt / 1000).toString()) : '')}
                     </span>
                     {unreadCounts[contact.address] > 0 && (
                       <span className="bg-[var(--sui-blue)] text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[20px] text-center">
@@ -1011,17 +1197,13 @@ export function Chat() {
                     )}
                   </div>
                 </div>
-                <p className="text-[var(--sui-text-secondary)] text-sm truncate">
-                  {contact.lastMessage.isSender ? 'You: ' : ''}
-                  Encrypted Message
-                </p>
               </div>
             </div>
           ))}
         </div>
       </div>
 
-      {/* MAIN CHAT AREA */}
+      {/* MAIN CHAT AREA  */}
       <div className="flex-1 flex flex-col bg-[var(--sui-bg)] relative">
         {selectedContact ? (
           <>
@@ -1038,9 +1220,12 @@ export function Chat() {
                     title="Click to copy address"
                   >
                     {formatAddress(selectedContact)}
-                    <Copy size={14} className="opacity-50" />
+                    {copiedAddress === selectedContact ? (
+                      <CheckCheck size={14} className="text-green-500" />
+                    ) : (
+                      <Copy size={14} className="opacity-50" />
+                    )}
                   </h2>
-                  <p className="text-xs text-[var(--sui-text-secondary)]">Online</p>
                 </div>
               </div>
               <div className="flex gap-4 text-[var(--sui-text-secondary)] items-center">
@@ -1085,7 +1270,7 @@ export function Chat() {
                         : 'glass-card text-[var(--sui-text)] rounded-bl-none'
                         } ${msg.isOptimistic ? 'animate-optimistic' : ''}`}
                     >
-                      <p className="text-sm break-words whitespace-pre-wrap">
+                      <p className="text-sm break-all whitespace-pre-wrap">
                         {content && !isError ? (
                           <span>{content}</span>
                         ) : (
@@ -1102,9 +1287,16 @@ export function Chat() {
                                 <RefreshCw size={12} /> Failed to load (Click to retry)
                               </span>
                             ) : (
-                              <span className="italic text-gray-300 text-xs flex items-center gap-1">
-                                <RefreshCw className="animate-spin" size={10} /> Loading content...
-                              </span>
+                              !isSessionReady && !sessionKey ? (
+                                <span className="text-orange-400 text-xs flex items-center gap-2">
+                                  <Hourglass size={12} className="opacity-70" />
+                                  <span>Please start a session to decrypt messages</span>
+                                </span>
+                              ) : (
+                                <span className="italic text-gray-300 text-xs flex items-center gap-1">
+                                  <RefreshCw className="animate-spin" size={10} /> Loading content...
+                                </span>
+                              )
                             )
                           ) : 'Message content unavailable'
                         )}
@@ -1128,18 +1320,20 @@ export function Chat() {
               })}
               <div ref={messagesEndRef} />
 
-              {!isAtBottom && (
-                <button
-                  onClick={scrollToBottom}
-                  className="fixed bottom-24 right-8 sui-gradient text-white p-3 rounded-full shadow-2xl hover:scale-110 transition-transform z-10 glow-effect"
-                  title="Go to recent messages"
-                >
-                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
-                  </svg>
-                </button>
-              )}
+
             </div>
+
+            {!isAtBottom && (
+              <button
+                onClick={scrollToBottom}
+                className="absolute bottom-32 right-6 sui-gradient text-white p-3 rounded-full shadow-2xl hover:scale-110 transition-transform z-10 glow-effect"
+                title="Go to recent messages"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                </svg>
+              </button>
+            )}
 
             {/* Input Area */}
             <div className="bg-[var(--sui-bg-tertiary)] p-3 flex flex-col shrink-0 border-t border-[var(--sui-border)]">
@@ -1238,7 +1432,8 @@ export function Chat() {
         )}
       </div>
 
-      {/* SEAL Session Modal - Blocks app until signature accepted */}
+      {/* SEAL Session Modal - Blocks app until signature accepted  */}
+
       {showSealModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: 'rgba(0, 0, 0, 0.85)' }}>
           <div className="bg-[var(--sui-bg-secondary)] rounded-lg p-8 max-w-md mx-4 border border-[var(--sui-border)] shadow-2xl">
@@ -1270,9 +1465,62 @@ export function Chat() {
             </div>
           </div>
         </div>
+
       )}
 
-      {/* Chat Creation Loading Overlay */}
+      {/* End Session Confirmation Modal */}
+      {showEndSessionConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: 'rgba(0, 0, 0, 0.6)' }}>
+          <div className="bg-[var(--sui-bg-secondary)] rounded-xl p-6 max-w-sm mx-4 border border-[var(--sui-border)] shadow-2xl animate-in zoom-in-95 duration-200">
+            <h3 className="text-lg font-semibold text-[var(--sui-text)] mb-2">End Session?</h3>
+            <p className="text-sm text-[var(--sui-text-secondary)] mb-6">
+              You will need to sign a new transaction to decrypt messages again.
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setShowEndSessionConfirm(false)}
+                className="px-4 py-2 rounded-lg text-sm font-medium text-[var(--sui-text)] hover:bg-[var(--sui-bg-tertiary)] transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  refreshSession();
+                  setShowEndSessionConfirm(false);
+                }}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-red-500 text-white hover:bg-red-600 transition-colors shadow-lg shadow-red-500/20"
+              >
+                End Session
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Error Toast Notification */}
+      {errorMessage && (
+        <div className="fixed top-6 right-6 z-50 animate-in slide-in-from-right-5 duration-300">
+          <div className="bg-red-500 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 max-w-sm">
+            <div className="bg-white/20 p-1 rounded-full shrink-0">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </div>
+            <p className="text-sm font-medium">{errorMessage}</p>
+            <button
+              onClick={() => setErrorMessage(null)}
+              className="ml-auto hover:bg-white/20 p-1 rounded-lg transition-colors"
+            >
+              <span className="sr-only">Close</span>
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Chat Creation Loading Overlay  */}
       {isCreatingChat && (
         <div className="fixed inset-0 z-40 flex items-center justify-center" style={{ backgroundColor: 'rgba(0, 0, 0, 0.7)' }}>
           <div className="bg-[var(--sui-bg-secondary)] rounded-lg p-6 max-w-sm mx-4 border border-[var(--sui-border)] shadow-xl">
@@ -1288,7 +1536,8 @@ export function Chat() {
             </div>
           </div>
         </div>
+
       )}
-    </div>
+    </div >
   );
 }

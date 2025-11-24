@@ -1,7 +1,7 @@
 import { ConnectButton, useCurrentAccount } from '@mysten/dapp-kit';
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { MessageSquare, Shield, Zap, Lock, Sun, Moon } from 'lucide-react';
+import { Shield, Zap, Lock, Sun, Moon } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
 
 export function LandingPage() {
@@ -40,8 +40,8 @@ export function LandingPage() {
                 <div className="max-w-2xl w-full text-center space-y-8">
                     {/* Logo & Title */}
                     <div className="space-y-4">
-                        <div className="inline-flex items-center justify-center w-24 h-24 glass-card glow-effect mx-auto">
-                            <MessageSquare className="w-12 h-12 text-[var(--sui-blue)]" />
+                        <div className="inline-flex items-center justify-center w-32 h-32 mx-auto">
+                            <img src="/logo.png" alt="Sui Messenger Logo" className="w-full h-full object-contain drop-shadow-2xl" />
                         </div>
 
                         <h1 className="text-6xl font-bold">
