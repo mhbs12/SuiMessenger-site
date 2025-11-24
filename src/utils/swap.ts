@@ -1,13 +1,20 @@
-import { Aftermath } from 'aftermath-ts-sdk';
+// NOTE: Aftermath SDK integration temporarily disabled
+// To enable: npm install aftermath-ts-sdk
+
+// import { Aftermath } from 'aftermath-ts-sdk';
 import { Transaction } from '@mysten/sui/transactions';
-import { WAL_COIN_TYPE, NETWORK } from '../constants';
+// import { WAL_COIN_TYPE, NETWORK } from '../constants';
 
 // Initialize Aftermath SDK
 // Note: Aftermath SDK usually requires a provider or network config. 
 // We'll initialize it lazily or with default settings for the network.
-const af = new Aftermath(NETWORK === 'mainnet' ? 'MAINNET' : 'TESTNET');
+// const af = new Aftermath(NETWORK === 'mainnet' ? 'MAINNET' : 'TESTNET');
 
-export async function getSwapQuote(amountWalNeeded: bigint, senderAddress: string) {
+export async function getSwapQuote(_amountWalNeeded: bigint, _senderAddress: string) {
+    // TODO: Install aftermath-ts-sdk and uncomment the implementation below
+    throw new Error('Swap functionality requires aftermath-ts-sdk to be installed');
+
+    /* Original implementation:
     try {
         const router = af.Router();
 
@@ -26,13 +33,18 @@ export async function getSwapQuote(amountWalNeeded: bigint, senderAddress: strin
         console.error('Failed to get swap quote:', error);
         throw error;
     }
+    */
 }
 
 export async function buildSwapTransaction(
-    tx: Transaction,
-    quote: any,
-    senderAddress: string
+    _tx: Transaction,
+    _quote: any,
+    _senderAddress: string
 ) {
+    // TODO: Install aftermath-ts-sdk and uncomment the implementation below
+    throw new Error('Swap functionality requires aftermath-ts-sdk to be installed');
+
+    /* Original implementation:
     try {
         const router = af.Router();
 
@@ -50,4 +62,5 @@ export async function buildSwapTransaction(
         console.error('Failed to build swap transaction:', error);
         throw error;
     }
+    */
 }

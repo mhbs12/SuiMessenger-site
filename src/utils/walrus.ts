@@ -138,7 +138,7 @@ export async function downloadFromWalrus(blobId: string): Promise<string> {
  * This adds the registration commands to the provided Transaction.
  */
 export async function registerBlob(
-    tx: any, // Transaction
+    _tx: any, // Transaction (unused - placeholder for future implementation)
     size: number,
     epochs: number = 1
 ): Promise<{ blobId: string; storageCost: bigint }> {

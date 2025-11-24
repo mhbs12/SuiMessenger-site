@@ -2,7 +2,6 @@ import { useCurrentAccount } from '@mysten/dapp-kit';
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Chat } from '../components/Chat';
-import { Inbox } from '../components/Inbox';
 
 export function MessengerPage() {
     const account = useCurrentAccount();
