@@ -1,12 +1,15 @@
 import { useState, useEffect } from 'react';
-import { useCurrentAccount } from '@mysten/dapp-kit';
+import { useCurrentAccount, useSuiClient } from '@mysten/dapp-kit';
 import { SessionKey } from '@mysten/seal';
+import { getSealCompatibleClient } from '../utils/crypto';
 
 interface UseSealSessionReturn {
     sessionKey: SessionKey | null;
     isReady: boolean;
+    isLoading: boolean;
     error: string | null;
     refresh: () => void;
+    saveSession: (key: SessionKey) => void;
 }
 
 const SESSION_STORAGE_KEY = 'seal_session_data';
@@ -20,14 +23,20 @@ const SESSION_STORAGE_KEY = 'seal_session_data';
  */
 export function useSealSession(): UseSealSessionReturn {
     const account = useCurrentAccount();
+    const suiClient = useSuiClient(); // Get client from context
     const [sessionKey, setSessionKey] = useState<SessionKey | null>(null);
     const [isReady, setIsReady] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [isLoading, setIsLoading] = useState(true);
 
     const loadSession = () => {
+        console.log('[SEAL Hook] loadSession called');
+        setIsLoading(true);
         if (!account) {
+            console.log('[SEAL Hook] No account, clearing session');
             setSessionKey(null);
             setIsReady(false);
+            setIsLoading(false);
             return;
         }
 
@@ -37,12 +46,21 @@ export function useSealSession(): UseSealSessionReturn {
             // Try to load from localStorage
             const stored = localStorage.getItem(SESSION_STORAGE_KEY);
             if (stored) {
+                console.log('[SEAL Hook] Found stored session');
+                // We serialized BigInts as strings, but SessionKey.import might expect BigInts?
+                // Let's try parsing normally first. If it fails, we might need a reviver.
+                // Actually, let's just parse it.
                 const exportedSession = JSON.parse(stored);
+                console.log('[SEAL Hook] Parsed session from storage:', {
+                    hasAddress: !!exportedSession.address,
+                    hasSignature: !!exportedSession.personalMessageSignature,
+                    signatureLength: exportedSession.personalMessageSignature?.length
+                });
 
-                // Note: SessionKey.import() requires a SuiClient, but we're skipping it
-                // since we just want to check expiry. If needed for decryption, refresh.
+                // Note: SessionKey.import() requires a SEAL-compatible client
                 try {
-                    const parsedSession = SessionKey.import(exportedSession, null as any);
+                    const sealClient = getSealCompatibleClient();
+                    const parsedSession = SessionKey.import(exportedSession, sealClient);
 
                     // Check if expired
                     if (parsedSession.isExpired()) {
@@ -57,13 +75,14 @@ export function useSealSession(): UseSealSessionReturn {
                         console.log('[SEAL Session] Loaded from localStorage');
                     }
                 } catch (importError) {
-                    console.warn('[SEAL Session] Failed to import, clearing');
+                    console.warn('[SEAL Session] Failed to import, clearing', importError);
                     localStorage.removeItem(SESSION_STORAGE_KEY);
                     setSessionKey(null);
                     setIsReady(false);
                 }
             } else {
                 // No session found
+                console.log('[SEAL Hook] No stored session found');
                 setSessionKey(null);
                 setIsReady(false);
             }
@@ -72,6 +91,40 @@ export function useSealSession(): UseSealSessionReturn {
             setError(errorMessage);
             setIsReady(false);
             console.error('[SEAL Session] Load error:', err);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const saveSession = (key: SessionKey) => {
+        console.log('[SEAL Hook] saveSession called');
+        try {
+            const exported = key.export();
+
+            // SEAL explicitly adds a throwing toJSON property to prevent accidental serialization.
+            // We need to clone the object to remove this property so we can save it to localStorage.
+            const serializable = {
+                address: exported.address,
+                packageId: exported.packageId,
+                mvrName: exported.mvrName,
+                creationTimeMs: exported.creationTimeMs,
+                ttlMin: exported.ttlMin,
+                personalMessageSignature: exported.personalMessageSignature,
+                sessionKey: exported.sessionKey
+            };
+
+            const serialized = JSON.stringify(serializable, (_, v) =>
+                typeof v === 'bigint' ? v.toString() : v
+            );
+            localStorage.setItem(SESSION_STORAGE_KEY, serialized);
+            console.log('[SEAL Session] Session saved to localStorage');
+
+            // Update state immediately
+            setSessionKey(key);
+            setIsReady(true);
+            console.log('[SEAL Hook] State updated with new key');
+        } catch (error) {
+            console.error('[SEAL Session] Failed to save session:', error);
         }
     };
 
@@ -90,22 +143,11 @@ export function useSealSession(): UseSealSessionReturn {
     return {
         sessionKey,
         isReady,
+        isLoading,
         error,
         refresh,
+        saveSession, // Expose this
     };
-}
-
-/**
- * Helper function to manually set a session key (after wallet signature)
- */
-export function setSealSession(sessionKey: SessionKey): void {
-    try {
-        const exported = sessionKey.export();
-        localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(exported));
-        console.log('[SEAL Session] Session saved to localStorage');
-    } catch (error) {
-        console.error('[SEAL Session] Failed to save session:', error);
-    }
 }
 
 /**
