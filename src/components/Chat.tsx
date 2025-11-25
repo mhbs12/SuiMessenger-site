@@ -1,18 +1,19 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { useCurrentAccount, useSuiClientQuery, useSignAndExecuteTransaction, ConnectButton, useSuiClient, useSignPersonalMessage } from '@mysten/dapp-kit';
+import { useCurrentAccount, useSuiClientQuery, useSignAndExecuteTransaction, ConnectButton, useSuiClient, useSignPersonalMessage, useDisconnectWallet } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
 import { PACKAGE_ID, CHAT_REGISTRY_ID } from '../constants';
-import { MessageSquare, Send, Search, MoreVertical, PlusCircle, RefreshCw, Clock, Sun, Moon, CheckCheck, Copy, Hourglass, Power, Play } from 'lucide-react';
+import { MessageSquare, Send, Search, MoreVertical, PlusCircle, RefreshCw, Clock, Sun, Moon, CheckCheck, Copy, Hourglass, Power, Play, Settings } from 'lucide-react';
 import { uploadToWalrus, downloadFromWalrus } from '../utils/walrus';
 import { calculateContentHash, encryptMessage, decryptMessage, createSealSession } from '../utils/crypto';
 import { useSealSession } from '../hooks/useSealSession';
 import { useTheme } from '../context/ThemeContext';
 import { ReadReceipt } from './ReadReceipt';
+import { SettingsModal } from './SettingsModal';
+import { SessionTTLSelector } from './SessionTTLSelector';
+import { getCurrentTTLOption } from '../utils/session-preferences';
 import { bcs } from '@mysten/sui/bcs';
 import { fromHex, toHex, toHEX, normalizeSuiAddress } from '@mysten/sui/utils';
 import { getSwapQuote, buildSwapTransaction } from '../utils/swap';
-
-// Define BCS types explicitly to ensure control
 const Address = bcs.bytes(32).transform({
   input: (val: string) => fromHex(val),
   output: (val) => toHex(val),
@@ -23,6 +24,7 @@ export function Chat() {
   const account = useCurrentAccount();
   const suiClient = useSuiClient();
   const { mutateAsync: signPersonalMessage } = useSignPersonalMessage();
+  const { mutate: disconnect } = useDisconnectWallet();
   const { theme, toggleTheme } = useTheme();
 
   // SEAL Session Management
@@ -35,7 +37,21 @@ export function Chat() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [timeRemaining, setTimeRemaining] = useState<string>('');
   const [hasHadSession, setHasHadSession] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showDisconnectMenu, setShowDisconnectMenu] = useState(false);
+  const [showTTLSelector, setShowTTLSelector] = useState(false);
   const attemptRef = useRef<string | null>(null);
+
+  // Check for TTL preference on mount
+  useEffect(() => {
+    const currentTTL = getCurrentTTLOption();
+    if (!currentTTL) {
+      const savedPref = localStorage.getItem('seal_session_ttl_preference');
+      if (!savedPref) {
+        setShowTTLSelector(true);
+      }
+    }
+  }, []);
 
   // ... (initSession logic)
 
@@ -49,6 +65,19 @@ export function Chat() {
 
         if (attemptRef.current === account.address) {
           return; // Already attempted for this account
+        }
+
+        // Check if user has TTL preference
+        const currentTTL = getCurrentTTLOption();
+        if (!currentTTL) {
+          // No preference saved, show TTL selector first
+          // We check localStorage directly to be sure, as getCurrentTTLOption returns undefined if not set
+          const savedPref = localStorage.getItem('seal_session_ttl_preference');
+          if (!savedPref) {
+            setShowTTLSelector(true);
+            setHasHadSession(true); // Prevent auto-retry loop while selecting
+            return;
+          }
         }
 
         setIsCreatingSession(true);
@@ -493,10 +522,37 @@ export function Chat() {
               }
             } else {
               // No session key yet or no chat ID - store encrypted for now
-              console.warn(`[SEAL] Cannot decrypt ${msgId}: missing session key or chat ID`);
+              const chatId = chatIds[selectedContact?.toLowerCase() || ''];
+              console.warn(`[SEAL] Cannot decrypt ${msgId}: missing session key (${!!sessionKey}) or chat ID (${!!chatId}) for contact ${selectedContact}`);
+              if (!chatId) {
+                console.log('Current chatIds state:', JSON.stringify(chatIds));
+              }
               setDecryptedMessages(prev => ({
                 ...prev,
-                [msgId]: "🔒 Creating secure session..."
+                [msgId]: (
+                  <span
+                    className="cursor-pointer hover:underline text-blue-400"
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      console.log("Retrying chat ID lookup...");
+                      const id = await fetchChatId(selectedContact!);
+                      if (id) {
+                        setChatIds(prev => ({ ...prev, [selectedContact!.toLowerCase()]: id }));
+                        // Clear this message so it re-renders
+                        setDecryptedMessages(prev => {
+                          const newState = { ...prev };
+                          delete newState[msgId];
+                          return newState;
+                        });
+                      } else {
+                        alert("Still could not find Chat ID. Please try creating the chat again.");
+                        createChatForContact(selectedContact!);
+                      }
+                    }}
+                  >
+                    🔒 Creating secure session... (Click to retry)
+                  </span>
+                )
               }));
             }
           } catch (e) {
@@ -605,9 +661,36 @@ export function Chat() {
 
     const contactKey = selectedContact.toLowerCase();
 
-    // If no chat exists for this contact, create one
+    // If no chat exists for this contact, check registry first
     if (!chatIds[contactKey]) {
-      createChatForContact(selectedContact);
+      let isCancelled = false;
+
+      const checkRegistryAndCreate = async () => {
+        console.log('[Chat] Checking registry for existing chat with:', selectedContact);
+        try {
+          // 1. Check Registry
+          const existingId = await fetchChatId(selectedContact);
+
+          if (isCancelled) return;
+
+          if (existingId) {
+            console.log('[Chat] Found existing chat on-chain:', existingId);
+            setChatIds(prev => ({ ...prev, [contactKey]: existingId }));
+          } else {
+            // 2. Only create if not found
+            console.log('[Chat] No existing chat found, proceeding to create...');
+            createChatForContact(selectedContact);
+          }
+        } catch (e) {
+          console.error('[Chat] Error checking registry:', e);
+        }
+      };
+
+      checkRegistryAndCreate();
+
+      return () => {
+        isCancelled = true;
+      };
     }
   }, [selectedContact, chatIds, account]);
 
@@ -767,6 +850,7 @@ export function Chat() {
       const keyArray = Array.from(keyBytes);
 
       console.log("Looking up key in Table:", tableId);
+      console.log("Sorted Addresses:", sorted);
 
       // 2. Query the Table Object
       // Try vector<address> first (Standard Move pattern)
@@ -803,6 +887,7 @@ export function Chat() {
         return fields.value;
       }
 
+      console.warn("Chat ID not found in registry for:", sorted);
       return null;
     } catch (e) {
       console.error("Error fetching chat ID:", e);
@@ -1060,60 +1145,90 @@ export function Chat() {
       <div className="w-[400px] bg-[var(--sui-bg-secondary)] border-r border-[var(--sui-border)] flex flex-col">
         {/* Header Sidebar */}
         <div className="h-[60px] px-4 bg-[var(--sui-bg-tertiary)] flex justify-between items-center shrink-0 border-b border-[var(--sui-border)]">
-          <div className="flex items-center gap-3 wallet-btn-container">
-            <ConnectButton />
-            {account && (
+          <div className="flex items-center gap-2 wallet-btn-container">
+            {!account ? (
+              <ConnectButton />
+            ) : (
               <button
                 onClick={(e) => handleCopy(account.address, e)}
-                className="p-2 hover:bg-[var(--sui-bg-secondary)] rounded-full transition-colors text-[var(--sui-text-secondary)] hover:text-[var(--sui-blue)]"
-                title="Copy My Address"
+                className="flex items-center gap-2 h-7 px-3 bg-[var(--sui-bg-secondary)] hover:bg-[var(--sui-bg)] border border-[var(--sui-border)] rounded-full transition-all group shadow-sm"
+                title="Click to Copy Address"
               >
-                {copiedAddress === account.address ? <CheckCheck size={18} className="text-green-500" /> : <Copy size={18} />}
+                <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+                <span className="text-xs font-medium text-[var(--sui-text)] group-hover:text-[var(--sui-blue)] transition-colors">
+                  {formatAddress(account.address)}
+                </span>
+                {copiedAddress === account.address ? (
+                  <CheckCheck size={12} className="text-green-500" />
+                ) : (
+                  <Copy size={12} className="text-[var(--sui-text-secondary)] opacity-0 group-hover:opacity-100 transition-opacity" />
+                )}
               </button>
             )}
           </div>
-          <div className="flex gap-3 text-[var(--sui-text-secondary)] items-center">
+          <div className="flex gap-2 text-[var(--sui-text-secondary)] items-center">
             {timeRemaining ? (
               <div
-                className="flex items-center gap-2 text-xs px-3 py-1.5 bg-[var(--sui-bg-secondary)] rounded-full border border-[var(--sui-border)] shadow-sm"
+                className="flex items-center gap-2 h-7 px-3 bg-[var(--sui-bg-secondary)] rounded-full border border-[var(--sui-border)] shadow-sm"
                 title="Session expiration timer"
               >
-                <Hourglass size={14} className="text-[var(--sui-blue)] animate-pulse" />
-                <span className={timeRemaining === 'Expired' ? 'text-red-500 font-semibold' : 'text-[var(--sui-text)] font-medium tabular-nums'}>
+                <Hourglass size={12} className="text-[var(--sui-blue)] animate-pulse" />
+                <span className={`text-xs font-medium tabular-nums ${timeRemaining === 'Expired' ? 'text-red-500' : 'text-[var(--sui-text)]'}`}>
                   {timeRemaining === 'Expired' ? 'Expired' : `${timeRemaining}`}
                 </span>
                 {timeRemaining !== 'Expired' && (
                   <button
                     onClick={() => setShowEndSessionConfirm(true)}
-                    className="ml-1 p-1 hover:bg-red-500/10 rounded-full text-[var(--sui-text-secondary)] hover:text-red-500 transition-all"
+                    className="ml-1 p-0.5 hover:bg-red-500/10 rounded-full text-[var(--sui-text-secondary)] hover:text-red-500 transition-all"
                     title="End Session"
                   >
-                    <Power size={14} />
+                    <Power size={12} />
                   </button>
                 )}
               </div>
             ) : (
-              // Show "Start Session" button if connected but no session (and not loading)
+              // Show "Unlock" button if connected but no session (and not loading)
               account && !isSessionLoading && !sessionKey && (
                 <button
                   onClick={() => {
                     setHasHadSession(false); // Reset flag to trigger auto-init
                     attemptRef.current = null; // Reset attempt ref to allow re-try
                   }}
-                  className="flex items-center gap-2 text-xs px-3 py-1.5 bg-[var(--sui-blue)] text-white rounded-full hover:opacity-90 transition-all shadow-sm"
-                  title="Start a new secure session"
+                  className="flex items-center gap-1.5 h-7 px-3 bg-[var(--sui-blue)] text-white rounded-full hover:opacity-90 transition-all shadow-sm"
+                  title="Unlock secure session"
                 >
-                  <Play size={12} fill="currentColor" />
-                  <span>Start Session</span>
+                  <Play size={10} fill="currentColor" />
+                  <span className="text-xs font-medium tabular-nums">Unlock</span>
                 </button>
               )
             )}
+
+            {/* Settings Button */}
+            <button
+              onClick={() => setShowSettings(true)}
+              className="w-8 h-8 flex items-center justify-center hover:bg-[var(--sui-bg-secondary)] rounded-full transition-colors"
+              title="Settings"
+            >
+              <Settings size={16} />
+            </button>
+
+            {/* Disconnect Button */}
+            {account && (
+              <button
+                onClick={() => setShowDisconnectMenu(true)}
+                className="w-8 h-8 flex items-center justify-center hover:bg-red-500/10 text-[var(--sui-text-secondary)] hover:text-red-500 rounded-full transition-colors"
+                title="Disconnect Wallet"
+              >
+                <Power size={16} />
+              </button>
+            )}
+
             <button
               onClick={toggleTheme}
-              className="p-2 hover:bg-[var(--sui-bg-secondary)] rounded-full transition-colors"
+              className="w-8 h-8 flex items-center justify-center hover:bg-[var(--sui-bg-secondary)] rounded-full transition-colors"
               title={`Switch to ${theme === 'dark' ? 'Light' : 'Dark'} Mode`}
             >
-              {theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}
+              {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
             </button>
           </div>
         </div>
@@ -1454,7 +1569,6 @@ export function Chat() {
               {sealError ? (
                 <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 mb-4">
                   <p className="text-red-400 text-sm mb-2">{sealError}</p>
-                  <p className="text-xs text-[var(--sui-text-secondary)]">Redirecting to connection screen...</p>
                 </div>
               ) : (
                 <div className="flex items-center justify-center gap-3 text-[var(--sui-text-secondary)]">
@@ -1491,6 +1605,60 @@ export function Chat() {
                 className="px-4 py-2 rounded-lg text-sm font-medium bg-red-500 text-white hover:bg-red-600 transition-colors shadow-lg shadow-red-500/20"
               >
                 End Session
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Settings Modal */}
+      <SettingsModal
+        isOpen={showSettings}
+        onClose={() => setShowSettings(false)}
+        onEndSession={() => setShowEndSessionConfirm(true)}
+      />
+
+      {/* TTL Selector Modal - First Time Setup */}
+      {showTTLSelector && (
+        <SessionTTLSelector
+          isOpen={showTTLSelector}
+          onClose={() => { }} // No-op, mandatory
+          onConfirm={() => {
+            setShowTTLSelector(false);
+            setHasHadSession(false); // Trigger session creation
+            attemptRef.current = null;
+          }}
+        />
+      )}
+
+      {/* Disconnect Confirmation Modal */}
+      {showDisconnectMenu && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: 'rgba(0, 0, 0, 0.6)' }}>
+          <div className="bg-[var(--sui-bg-secondary)] rounded-xl p-6 max-w-sm mx-4 border border-[var(--sui-border)] shadow-2xl animate-in zoom-in-95 duration-200">
+            <h3 className="text-lg font-semibold text-[var(--sui-text)] mb-2">Disconnect Wallet?</h3>
+            <p className="text-sm text-[var(--sui-text-secondary)] mb-6">
+              {sessionKey
+                ? "This will end your current secure session and disconnect your wallet."
+                : "Are you sure you want to disconnect your wallet?"}
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setShowDisconnectMenu(false)}
+                className="px-4 py-2 rounded-lg text-sm font-medium text-[var(--sui-text-secondary)] hover:bg-[var(--sui-bg-tertiary)] transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (sessionKey) {
+                    refreshSession(); // End session first
+                  }
+                  disconnect(); // Then disconnect wallet
+                  setShowDisconnectMenu(false);
+                }}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-red-500 text-white hover:bg-red-600 transition-colors shadow-lg shadow-red-500/20"
+              >
+                Disconnect
               </button>
             </div>
           </div>

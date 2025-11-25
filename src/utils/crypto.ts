@@ -4,7 +4,8 @@ import { SuiClient, getFullnodeUrl } from '@mysten/sui/client';
 import { Transaction } from '@mysten/sui/transactions';
 import { fromHEX, toHEX, normalizeSuiAddress } from '@mysten/sui/utils';
 import { bcs } from '@mysten/sui/bcs';
-import { PACKAGE_ID, SEAL_KEY_SERVERS_TESTNET, SEAL_THRESHOLD, SEAL_SESSION_TTL_MINUTES } from '../constants';
+import { PACKAGE_ID, SEAL_KEY_SERVERS_TESTNET, SEAL_THRESHOLD } from '../constants';
+import { getSessionTTL } from './session-preferences';
 
 // ==================== BLAKE2b HASHING ====================
 
@@ -484,10 +485,14 @@ export async function createSealSession(
     try {
         console.log(`[SEAL] Creating session key for ${userAddress}...`);
 
+        // Get user's preferred TTL (throws if not set)
+        const ttlMin = getSessionTTL();
+        console.log(`[SEAL] Using user-configured TTL: ${ttlMin} minutes`);
+
         const sessionKey = await SessionKey.create({
             address: userAddress,
             packageId: PACKAGE_ID,
-            ttlMin: SEAL_SESSION_TTL_MINUTES,
+            ttlMin,
             suiClient: getSuiClient() as any,
         } as any); // Type assertion needed due to SDK version mismatch
 

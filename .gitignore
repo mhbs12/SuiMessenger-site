@@ -12,8 +12,6 @@ Thumbs.db
 npm-debug.log*
 .cache/
 *.tsbuildinfo
-
-# Debug files
 check_client.ts
 debug_*.ts
 *_dump.json
