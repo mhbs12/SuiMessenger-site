@@ -1622,7 +1622,6 @@ export function Chat() {
       {showTTLSelector && (
         <SessionTTLSelector
           isOpen={showTTLSelector}
-          onClose={() => { }} // No-op, mandatory
           onConfirm={() => {
             setShowTTLSelector(false);
             setHasHadSession(false); // Trigger session creation

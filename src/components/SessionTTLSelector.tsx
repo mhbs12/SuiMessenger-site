@@ -4,11 +4,10 @@ import { TTL_OPTIONS, saveSessionTTL } from '../utils/session-preferences';
 
 interface SessionTTLSelectorProps {
     isOpen: boolean;
-    onClose: () => void;
     onConfirm: () => void;
 }
 
-export function SessionTTLSelector({ isOpen, onClose, onConfirm }: SessionTTLSelectorProps) {
+export function SessionTTLSelector({ isOpen, onConfirm }: SessionTTLSelectorProps) {
     const [selectedTTL, setSelectedTTL] = useState<number | null>(null);
 
     const handleSelect = (minutes: number) => {
