@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Play, Pause, Volume2, VolumeX, Maximize2, Minimize2, Download } from 'lucide-react';
+import { Play, Pause, Volume2, VolumeX, Maximize2, Minimize2, Download, Repeat } from 'lucide-react';
 
 interface CustomVideoPlayerProps {
     src: string;
@@ -17,6 +17,30 @@ export function CustomVideoPlayer({ src, className = '', autoPlay = false }: Cus
     const [isMuted, setIsMuted] = useState(false);
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [showControls, setShowControls] = useState(false);
+    const [shouldAutoplay, setShouldAutoplay] = useState(autoPlay);
+    const prevSrcRef = useRef(src);
+
+    // Reset state when src changes
+    useEffect(() => {
+        if (prevSrcRef.current !== src) {
+            prevSrcRef.current = src;
+            setProgress(0);
+            setDuration(0);
+            setIsPlaying(shouldAutoplay);
+
+            if (videoRef.current) {
+                videoRef.current.currentTime = 0;
+                if (shouldAutoplay) {
+                    videoRef.current.play().catch(e => {
+                        console.warn("Auto-play failed:", e);
+                        setIsPlaying(false);
+                    });
+                } else {
+                    videoRef.current.pause();
+                }
+            }
+        }
+    }, [src, shouldAutoplay]);
 
     useEffect(() => {
         const video = videoRef.current;
@@ -207,6 +231,16 @@ export function CustomVideoPlayer({ src, className = '', autoPlay = false }: Cus
                             title="Fullscreen"
                         >
                             {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
+                        </button>
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                setShouldAutoplay(!shouldAutoplay);
+                            }}
+                            className={`p-1.5 rounded-lg transition-all ${shouldAutoplay ? 'text-[var(--sui-blue)] bg-white/10' : 'text-white/80 hover:text-white hover:bg-white/10'}`}
+                            title={`Autoplay: ${shouldAutoplay ? 'On' : 'Off'}`}
+                        >
+                            <Repeat size={18} className={shouldAutoplay ? "" : "opacity-50"} />
                         </button>
                     </div>
                 </div>

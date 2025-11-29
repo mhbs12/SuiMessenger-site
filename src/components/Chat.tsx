@@ -1,19 +1,22 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { useCurrentAccount, useSuiClientQuery, useSignAndExecuteTransaction, ConnectButton, useSuiClient, useSignPersonalMessage, useDisconnectWallet } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
-import { PACKAGE_ID, CHAT_REGISTRY_ID } from '../constants';
-import { MessageSquare, Send, Search, MoreVertical, PlusCircle, RefreshCw, Clock, Sun, Moon, CheckCheck, Copy, Hourglass, Power, Play, Settings, Paperclip, X, Maximize2 } from 'lucide-react';
-import { uploadToWalrus, downloadFromWalrus } from '../utils/walrus';
-import { calculateContentHash, encryptMessage, decryptMessage, createSealSession } from '../utils/crypto';
-import { useSealSession } from '../hooks/useSealSession';
+import { bcs } from '@mysten/bcs';
+import { fromHex, toHex, normalizeSuiAddress } from '@mysten/sui/utils';
+import { Mic, Trash2, StopCircle, Play, Pause, Send, Paperclip, Clock, CheckCheck, RefreshCw, MessageSquare, X, Maximize2, Hourglass, Copy, Power, Settings, Sun, Moon, Search, PlusCircle, MoreVertical } from 'lucide-react';
+
 import { useTheme } from '../context/ThemeContext';
-import { ReadReceipt } from './ReadReceipt';
-import { SettingsModal } from './SettingsModal';
+import { useSealSession } from '../hooks/useSealSession';
+import { CustomAudioPlayer } from './CustomAudioPlayer';
 import { CustomVideoPlayer } from './CustomVideoPlayer';
 import { SessionTTLSelector } from './SessionTTLSelector';
+import { SettingsModal } from './SettingsModal';
+import { ReadReceipt } from './ReadReceipt';
 import { getCurrentTTLOption } from '../utils/session-preferences';
-import { bcs } from '@mysten/sui/bcs';
-import { fromHex, toHex, normalizeSuiAddress } from '@mysten/sui/utils';
+import { PACKAGE_ID, CHAT_REGISTRY_ID } from '../constants';
+import { downloadFromWalrus, uploadToWalrus } from '../utils/walrus';
+import { encryptMessage, decryptMessage, calculateContentHash, createSealSession } from '../utils/crypto';
+
 const Address = bcs.bytes(32).transform({
   input: (val: string) => fromHex(val),
   output: (val) => toHex(val),
@@ -24,6 +27,7 @@ export function Chat() {
   const account = useCurrentAccount();
   const suiClient = useSuiClient();
   const { mutateAsync: signPersonalMessage } = useSignPersonalMessage();
+  const { mutateAsync: signAndExecuteAsync } = useSignAndExecuteTransaction();
   const { mutate: disconnect } = useDisconnectWallet();
   const { theme, toggleTheme } = useTheme();
 
@@ -43,6 +47,8 @@ export function Chat() {
   const [showTTLSelector, setShowTTLSelector] = useState(false);
   const [showVideoModal, setShowVideoModal] = useState(false);
   const [previewVideoSrc, setPreviewVideoSrc] = useState<string | null>(null);
+  const [videoGallery, setVideoGallery] = useState<string[]>([]);
+  const [videoGalleryIndex, setVideoGalleryIndex] = useState(0);
   const attemptRef = useRef<string | null>(null);
 
   // Check for TTL preference on mount
@@ -169,7 +175,7 @@ export function Chat() {
   const [messageText, setMessageText] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [isSending, setIsSending] = useState(false);
-  const [sendingStatus, setSendingStatus] = useState<string>('');
+  const [sendingStatus, setSendingStatus] = useState<string | null>(null);
   const [showNewChatInput, setShowNewChatInput] = useState(false);
   const [newChatAddress, setNewChatAddress] = useState('');
   const [decryptedMessages, setDecryptedMessages] = useState<Record<string, string>>({});
@@ -204,6 +210,14 @@ export function Chat() {
   const cancelSendingRef = useRef(false);
   const [sendingImagesCount, setSendingImagesCount] = useState(0);
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
+
+
+  // Audio Recording State
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Auto-resize textarea
   const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
@@ -1050,112 +1064,159 @@ export function Chat() {
         console.log("Found Chat ID via Table lookup (vector<u8>):", fields.value);
         return fields.value;
       }
-
-      console.warn("Chat ID not found in registry for:", sorted);
       return null;
-    } catch (e) {
-      console.error("Error fetching chat ID:", e);
+    } catch (error) {
+      console.error("Error in fetchChatId:", error);
       return null;
     }
-
   };
 
-  const { mutateAsync: signAndExecuteAsync } = useSignAndExecuteTransaction();
+  // Audio Recording Functions
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
 
-  const handleSendMessage = async () => {
-    if ((!messageText && selectedFiles.length === 0) || !selectedContact || !account) {
-      console.log("SendMessage: Missing required fields", { messageText, files: selectedFiles.length, selectedContact, account });
-      return;
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+
+      // Start Timer
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingDuration(prev => prev + 1);
+      }, 1000);
+
+    } catch (err) {
+      console.error("Error accessing microphone:", err);
+      alert("Could not access microphone. Please ensure permissions are granted.");
     }
+  };
 
-    console.log("SendMessage: Starting...");
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      if (mediaRecorderRef.current.stream) {
+        mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+      }
+      setIsRecording(false);
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+        recordingTimerRef.current = null;
+      }
+    }
+  };
 
-    // Reset Cancel Ref
+  const cancelRecording = () => {
+    stopRecording();
+    setRecordingDuration(0);
+    audioChunksRef.current = [];
+  };
+
+  const handleSendAudio = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const audioFile = new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' });
+        handleSendMessage(audioFile);
+        setRecordingDuration(0);
+        audioChunksRef.current = [];
+      };
+      stopRecording();
+    }
+  };
+
+  const handleSendMessage = async (audioFile?: File) => {
+    if ((!messageText.trim() && selectedFiles.length === 0 && !audioFile) || !selectedContact || !account) return;
+
+    setIsSending(true);
+    setSendingStatus('Preparing...');
     cancelSendingRef.current = false;
 
-    const optimisticIds: string[] = [];
-    const newOptimisticMessages: any[] = [];
-
-    // 1. Create Optimistic Messages for Files
-    selectedFiles.forEach((file, index) => {
-      const id = `temp_file_${Date.now()}_${index}`;
-      optimisticIds.push(id);
-      newOptimisticMessages.push({
-        id: { id },
-        sender: account.address,
-        recipient: selectedContact,
-        timestamp: Math.floor(Date.now() / 1000).toString(),
-        walrus_blob_id: id,
-        isSender: true,
-        isOptimistic: true
-      });
-      // Set preview immediately
-      if (filePreviews[index]) {
-        const prefix = file.type.startsWith('video') ? 'VID:' : 'IMG:';
-        setDecryptedMessages(prev => ({
-          ...prev,
-          [id]: `${prefix}${filePreviews[index].url}`
-        }));
-      }
-    });
-
-    // 2. Create Optimistic Message for Text (if any)
-    let textOptimisticId: string | null = null;
-    if (messageText.trim()) {
-      textOptimisticId = `temp_text_${Date.now()}`;
-      optimisticIds.push(textOptimisticId);
-      newOptimisticMessages.push({
-        id: { id: textOptimisticId },
-        sender: account.address,
-        recipient: selectedContact,
-        timestamp: Math.floor(Date.now() / 1000).toString(),
-        walrus_blob_id: textOptimisticId,
-        isSender: true,
-        isOptimistic: true
-      });
-      setDecryptedMessages(prev => ({
-        ...prev,
-        [textOptimisticId!]: messageText
-      }));
-    }
-
-    setOptimisticMessages(prev => [...prev, ...newOptimisticMessages]);
-
-    const messageToSend = messageText;
-    const imagesToProcess = [...selectedFiles]; // Capture ref
-
-    // Track if we are sending images for UI cancellation
-    setSendingImagesCount(imagesToProcess.length);
-
-    setMessageText('');
-    clearImageSelection(); // Clear UI immediately
-    setIsSending(true);
-
-    // Helper to check cancellation
     const checkCancelled = () => {
       if (cancelSendingRef.current) {
-        console.log("Sending cancelled by user");
-        // Restore State
-        if (messageToSend) setMessageText(messageToSend);
-        if (imagesToProcess.length > 0) {
-          setSelectedFiles(imagesToProcess);
-        }
-
-        // Remove Optimistic Messages
-        setOptimisticMessages(prev => prev.filter(m => !optimisticIds.includes(m.id.id)));
-
         setIsSending(false);
-        setSendingStatus('');
-        setSendingImagesCount(0);
+        setSendingStatus(null);
+        cancelSendingRef.current = false;
         return true;
       }
       return false;
     };
 
+    const messageToSend = messageText;
+    const optimisticIds: string[] = [];
+    let textOptimisticId: string | null = null;
+
+    // Create Optimistic Messages
+    const now = Date.now();
+    const imagesToProcess = audioFile ? [audioFile] : selectedFiles;
+
+    // For files
+    for (let i = 0; i < imagesToProcess.length; i++) {
+      const file = imagesToProcess[i];
+      const isVideo = file.type.startsWith('video');
+      const isAudio = file.type.startsWith('audio');
+      const tempId = `opt-${now}-${i}`;
+      optimisticIds.push(tempId);
+
+      // Create optimistic message object
+      const optMsg = {
+        id: { id: tempId },
+        sender: account.address,
+        timestamp_ms: String(now),
+        walrus_blob_id: null, // Will be updated after upload
+        content: isVideo ? 'VID:...' : isAudio ? 'AUD:...' : 'IMG:...', // Placeholder
+        isOptimistic: true,
+        is_read: false
+      };
+
+      // Add to state
+      setOptimisticMessages(prev => [...prev, optMsg as any]);
+
+      // Also set decrypted content immediately for preview
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        if (e.target?.result) {
+          const prefix = isVideo ? 'VID:' : isAudio ? 'AUD:' : 'IMG:';
+          setDecryptedMessages(prev => ({
+            ...prev,
+            [tempId]: `${prefix}${e.target!.result}`
+          }));
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // For text
+    if (messageToSend.trim()) {
+      const tempId = `opt-${now}-text`;
+      textOptimisticId = tempId;
+
+      const optMsg = {
+        id: { id: tempId },
+        sender: account.address,
+        timestamp_ms: String(now),
+        walrus_blob_id: null,
+        content: messageToSend,
+        isOptimistic: true,
+        is_read: false
+      };
+
+      setOptimisticMessages(prev => [...prev, optMsg as any]);
+      setDecryptedMessages(prev => ({
+        ...prev,
+        [tempId]: messageToSend
+      }));
+    }
+
     try {
-      // 1. Ensure we have a Chat ID (Scope for SEAL)
       let chatId = chatIds[selectedContact.toLowerCase()];
-      console.log("SendMessage: Initial Chat ID:", chatId);
 
       if (!chatId) {
         console.log("Chat ID not found in state, querying registry...");
@@ -1221,13 +1282,16 @@ export function Chat() {
       const tx = new Transaction();
       let hasActions = false;
 
+      const imagesToProcess = audioFile ? [audioFile] : selectedFiles;
+
       // Process Files
       for (let i = 0; i < imagesToProcess.length; i++) {
         if (checkCancelled()) return;
 
         const file = imagesToProcess[i];
         const isVideo = file.type.startsWith('video');
-        setSendingStatus(`Processing ${isVideo ? 'video' : 'image'} ${i + 1}/${imagesToProcess.length}...`);
+        const isAudio = file.type.startsWith('audio');
+        setSendingStatus(`Processing ${isVideo ? 'video' : isAudio ? 'audio' : 'image'} ${i + 1}/${imagesToProcess.length}...`);
         console.log(`SendMessage: Processing file ${i + 1}/${imagesToProcess.length}`);
 
         let content = '';
@@ -1237,6 +1301,15 @@ export function Chat() {
             const reader = new FileReader();
             reader.onloadend = () => {
               if (reader.result) resolve(`VID:${reader.result}`);
+            };
+            reader.readAsDataURL(file);
+          });
+        } else if (isAudio) {
+          // For audio, read as DataURL
+          content = await new Promise<string>((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              if (reader.result) resolve(`AUD:${reader.result}`);
             };
             reader.readAsDataURL(file);
           });
@@ -1367,7 +1440,9 @@ export function Chat() {
         console.warn("SendMessage: No actions to perform in transaction");
       }
 
-      setSendingStatus('');
+      setMessageText('');
+      clearImageSelection();
+      setSendingStatus(null);
       refetchMessages();
       refetchChats();
 
@@ -1885,7 +1960,18 @@ export function Chat() {
                                 return (
                                   <div key={idx} className={itemClass} onClick={() => {
                                     if (isVideo) {
+                                      // Filter only videos for the gallery
+                                      const videoSources = gridItems.map(it => {
+                                        const id = getMsgId(it.msg, it.index);
+                                        const c = decryptedMessages[id];
+                                        return c?.startsWith('VID:') ? c.substring(4).split('|||')[0] : null;
+                                      }).filter(s => s) as string[];
+
+                                      const currentIdx = videoSources.indexOf(src);
+
                                       setPreviewVideoSrc(src);
+                                      setVideoGallery(videoSources);
+                                      setVideoGalleryIndex(currentIdx !== -1 ? currentIdx : 0);
                                       setShowVideoModal(true);
                                     } else {
                                       setGalleryImages(allSources);
@@ -1956,9 +2042,10 @@ export function Chat() {
                       const content = decryptedMessages[msgId];
                       const isError = content === "⚠️ Failed to load content";
 
-                      // Parse Content for Image/Video + Caption
+                      // Parse Content for Image/Video/Audio + Caption
                       let imageSrc: string | null = null;
                       let videoSrc: string | null = null;
+                      let audioSrc: string | null = null;
                       let captionText: string | null = null;
 
                       if (content && !isError) {
@@ -1974,6 +2061,12 @@ export function Chat() {
                           if (parts.length > 1) {
                             captionText = parts.slice(1).join('|||');
                           }
+                        } else if (content.startsWith('AUD:')) {
+                          const parts = content.split('|||');
+                          audioSrc = parts[0].substring(4); // Remove AUD:
+                          if (parts.length > 1) {
+                            captionText = parts.slice(1).join('|||');
+                          }
                         } else {
                           captionText = content;
                         }
@@ -1986,7 +2079,7 @@ export function Chat() {
                             }`}
                         >
                           <div
-                            className={`max-w-[70%] ${imageSrc || videoSrc ? 'md:max-w-md' : 'md:max-w-2xl'} rounded-2xl shadow-lg relative backdrop-blur-sm flex flex-col overflow-hidden ${msg.isSender
+                            className={`max-w-[70%] ${imageSrc || videoSrc ? 'md:max-w-md' : audioSrc ? 'md:max-w-sm' : 'md:max-w-2xl'} rounded-2xl shadow-lg relative backdrop-blur-sm flex flex-col overflow-hidden ${msg.isSender
                               ? 'bg-gradient-to-br from-[var(--sui-blue)] to-[var(--sui-cyan)] text-white rounded-br-none'
                               : 'glass-card text-[var(--sui-text)] rounded-bl-none'
                               } ${msg.isOptimistic ? 'animate-optimistic' : ''}`}
@@ -2001,17 +2094,27 @@ export function Chat() {
                               </div>
                             )}
 
+                            {/* Audio Part */}
+                            {audioSrc && (
+                              <div className="p-2 min-w-[250px]">
+                                <CustomAudioPlayer src={audioSrc} />
+                              </div>
+                            )}
+
                             {/* Image Part */}
                             {imageSrc && (
                               <div className="relative group cursor-pointer p-1" onClick={() => {
                                 setFullScreenImage(imageSrc);
                                 setShowImageModal(true);
                               }}>
-                                <div className="relative overflow-hidden rounded-xl border border-white/10 shadow-sm">
+                                <div className="relative overflow-hidden rounded-xl border border-white/10 shadow-sm min-h-[200px] bg-[var(--sui-bg-secondary)]">
                                   <img
                                     src={imageSrc}
                                     alt="Encrypted Image"
                                     className="w-full max-h-[400px] object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+                                    onLoad={() => {
+                                      if (isAtBottom) scrollToBottom('auto');
+                                    }}
                                   />
                                   <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100">
                                     <Maximize2 className="text-white drop-shadow-md" />
@@ -2094,10 +2197,10 @@ export function Chat() {
             {/* Input Area */}
             < div className="bg-[var(--sui-bg-tertiary)] p-3 flex flex-col shrink-0 border-t border-[var(--sui-border)] relative" >
               <div className="flex items-end gap-3 relative">
-                <div className="flex-1 bg-[var(--sui-bg-secondary)] border border-[var(--sui-border)] rounded-2xl flex flex-col transition-all focus-within:border-[var(--sui-blue)] focus-within:ring-1 focus-within:ring-[var(--sui-blue)] transition-all relative">
+                <div className={`flex-1 rounded-2xl border transition-all shadow-sm relative flex flex-col ${isRecording ? 'bg-[var(--sui-bg-secondary)] border-red-500/30' : 'bg-[var(--sui-bg-secondary)] border-[var(--sui-border)] focus-within:border-[var(--sui-blue)]'}`}>
 
                   {/* Integrated File Preview */}
-                  {filePreviews.length > 0 && (
+                  {filePreviews.length > 0 && !isRecording && (
                     <div className="p-3 pb-0 animate-in slide-in-from-bottom-2 fade-in duration-200 flex gap-2 overflow-x-auto custom-scrollbar">
                       {filePreviews.map((preview, index) => (
                         <div key={index} className="relative inline-block group shrink-0">
@@ -2138,121 +2241,166 @@ export function Chat() {
                     </div>
                   )}
 
-                  <textarea
-                    ref={textareaRef}
-                    placeholder="Type a message..."
-                    className="bg-transparent w-full text-[var(--sui-text)] p-3 focus:outline-none placeholder-[var(--sui-text-secondary)] resize-none max-h-32 min-h-[44px]"
-                    value={messageText}
-                    onChange={(e) => setMessageText(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        handleSendMessage();
-                      }
-                    }}
-                    rows={1}
-                  />
-                  <div className="flex justify-between items-center px-2 pb-2">
-                    <div className="flex items-center gap-2">
-                      <div className="relative" onClick={(e) => e.stopPropagation()}>
-                        <input
-                          type="file"
-                          ref={fileInputRef}
-                          onChange={handleFileSelect}
-                          accept="image/*,video/*"
-                          multiple
-                          className="hidden"
-                        />
-                        <button
-                          className={`p-1.5 rounded-lg transition-all flex items-center gap-1 ${selectedFiles.length > 0
-                            ? 'text-[var(--sui-blue)] bg-[var(--sui-blue)]/10'
-                            : 'text-[var(--sui-text-secondary)] hover:text-[var(--sui-blue)] hover:bg-[var(--sui-bg-tertiary)]'}`}
-                          title="Attach File"
-                          onClick={() => fileInputRef.current?.click()}
-                        >
-                          <Paperclip size={18} />
-                        </button>
-                      </div>
+                  {isRecording ? (
+                    <div className="p-3 flex items-center justify-between">
+                      <button
+                        onClick={cancelRecording}
+                        className="p-2 text-red-500 hover:bg-red-500/10 rounded-full transition-colors"
+                        title="Cancel Recording"
+                      >
+                        <Trash2 size={20} />
+                      </button>
 
-                      <div className="relative" onClick={(e) => e.stopPropagation()}>
-                        <button
-                          className="p-1.5 text-[var(--sui-text-secondary)] hover:text-[var(--sui-blue)] hover:bg-[var(--sui-bg-tertiary)] rounded-lg transition-all flex items-center gap-1"
-                          title="Set Message Expiration"
-                          onClick={() => setShowEpochDropdown(!showEpochDropdown)}
-                        >
-                          <Clock size={18} />
-                          <span className="text-xs font-medium">{epochs} epoch{epochs > 1 ? 's' : ''}</span>
-                        </button>
-
-                        {showEpochDropdown && (
-                          <>
-                            <div className="fixed inset-0 z-40" onClick={() => setShowEpochDropdown(false)} />
-                            <div className="absolute bottom-full left-0 mb-2 w-48 bg-[var(--sui-bg-tertiary)] border border-[var(--sui-border)] rounded-xl shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-                              <div className="p-2 border-b border-[var(--sui-border)] bg-[var(--sui-bg-secondary)]">
-                                <p className="text-[10px] text-[var(--sui-text-secondary)] font-medium uppercase tracking-wider">Expires On</p>
-                                <p className="text-xs text-[var(--sui-text)] font-semibold mt-0.5">{expirationDate}</p>
-                              </div>
-                              <div className="max-h-48 overflow-y-auto custom-scrollbar p-1">
-                                {[1, 2, 3, 4, 5, 7, 14, 30].map((val) => (
-                                  <button
-                                    key={val}
-                                    onClick={() => {
-                                      if (epochs === val) {
-                                        setShowEpochDropdown(false);
-                                      } else {
-                                        setEpochs(val);
-                                      }
-                                    }}
-                                    className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex justify-between items-center ${epochs === val
-                                      ? 'bg-[var(--sui-blue)] text-white'
-                                      : 'text-[var(--sui-text)] hover:bg-[var(--sui-bg-secondary)]'
-                                      }`}
-                                  >
-                                    <span>{val} Epoch{val > 1 ? 's' : ''}</span>
-                                    {epochs === val && <CheckCheck size={14} />}
-                                  </button>
-                                ))}
-                              </div>
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                    {sendingStatus && (
-                      <div className="flex-1 flex justify-end items-center px-3 animate-in fade-in duration-300 gap-2">
-                        <span className="text-[10px] font-medium text-[var(--sui-blue)] animate-pulse tracking-wide">
-                          {sendingStatus}
+                      <div className="flex items-center gap-3">
+                        <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.5)]" />
+                        <span className="font-mono font-medium text-[var(--sui-text)] text-lg">
+                          {Math.floor(recordingDuration / 60)}:{String(recordingDuration % 60).padStart(2, '0')}
                         </span>
-                        {isSending && sendingImagesCount > 0 && (
+                      </div>
+
+                      <button
+                        onClick={handleSendAudio}
+                        className="p-2 bg-[var(--sui-blue)] text-white rounded-full hover:scale-105 transition-transform shadow-md"
+                        title="Send Voice Message"
+                      >
+                        <Send size={20} />
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <textarea
+                        ref={textareaRef}
+                        value={messageText}
+                        placeholder="Type a message..."
+                        className="w-full bg-transparent border-none focus:ring-0 outline-none p-3 min-h-[44px] max-h-32 resize-none text-[var(--sui-text)] placeholder-[var(--sui-text-tertiary)]"
+                        onChange={(e) => setMessageText(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            if (messageText.trim() || selectedFiles.length > 0) {
+                              handleSendMessage();
+                            }
+                          }
+                        }}
+                        rows={1}
+                      />
+                      <div className="flex justify-between items-center px-2 pb-2">
+                        <div className="flex items-center gap-2">
+                          <div className="relative" onClick={(e) => e.stopPropagation()}>
+                            <input
+                              type="file"
+                              ref={fileInputRef}
+                              onChange={handleFileSelect}
+                              accept="image/*,video/*"
+                              multiple
+                              className="hidden"
+                            />
+                            <button
+                              className={`p-1.5 rounded-lg transition-all flex items-center gap-1 ${selectedFiles.length > 0
+                                ? 'text-[var(--sui-blue)] bg-[var(--sui-blue)]/10'
+                                : 'text-[var(--sui-text-secondary)] hover:text-[var(--sui-blue)] hover:bg-[var(--sui-bg-tertiary)]'}`}
+                              title="Attach File"
+                              onClick={() => fileInputRef.current?.click()}
+                            >
+                              <Paperclip size={18} />
+                            </button>
+                          </div>
+
+                          <div className="relative" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              className="p-1.5 text-[var(--sui-text-secondary)] hover:text-[var(--sui-blue)] hover:bg-[var(--sui-bg-tertiary)] rounded-lg transition-all flex items-center gap-1"
+                              title="Set Message Expiration"
+                              onClick={() => setShowEpochDropdown(!showEpochDropdown)}
+                            >
+                              <Clock size={18} />
+                              <span className="text-xs font-medium">{epochs} epoch{epochs > 1 ? 's' : ''}</span>
+                            </button>
+
+                            {showEpochDropdown && (
+                              <>
+                                <div className="fixed inset-0 z-40" onClick={() => setShowEpochDropdown(false)} />
+                                <div className="absolute bottom-full left-0 mb-2 w-48 bg-[var(--sui-bg-tertiary)] border border-[var(--sui-border)] rounded-xl shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+                                  <div className="p-2 border-b border-[var(--sui-border)] bg-[var(--sui-bg-secondary)]">
+                                    <p className="text-[10px] text-[var(--sui-text-secondary)] font-medium uppercase tracking-wider">Expires On</p>
+                                    <p className="text-xs text-[var(--sui-text)] font-semibold mt-0.5">{expirationDate}</p>
+                                  </div>
+                                  <div className="max-h-48 overflow-y-auto custom-scrollbar p-1">
+                                    {[1, 2, 3, 4, 5, 7, 14, 30].map((val) => (
+                                      <button
+                                        key={val}
+                                        onClick={() => {
+                                          if (epochs === val) {
+                                            setShowEpochDropdown(false);
+                                          } else {
+                                            setEpochs(val);
+                                          }
+                                        }}
+                                        className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex justify-between items-center ${epochs === val
+                                          ? 'bg-[var(--sui-blue)] text-white'
+                                          : 'text-[var(--sui-text)] hover:bg-[var(--sui-bg-secondary)]'
+                                          }`}
+                                      >
+                                        <span>{val} Epoch{val > 1 ? 's' : ''}</span>
+                                        {epochs === val && <CheckCheck size={14} />}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        </div>
+
+                        {sendingStatus && (
+                          <div className="flex-1 flex justify-end items-center px-3 animate-in fade-in duration-300 gap-2">
+                            <span className="text-[10px] font-medium text-[var(--sui-blue)] animate-pulse tracking-wide">
+                              {sendingStatus}
+                            </span>
+                            {isSending && sendingImagesCount > 0 && (
+                              <button
+                                onClick={() => {
+                                  cancelSendingRef.current = true;
+                                  setSendingStatus("Cancelling...");
+                                }}
+                                className="text-[10px] px-2 py-0.5 bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white border border-red-500/20 rounded-full transition-all"
+                                title="Cancel sending"
+                              >
+                                Cancel
+                              </button>
+                            )}
+                          </div>
+                        )}
+
+                        {isSending ? (
                           <button
-                            onClick={() => {
-                              cancelSendingRef.current = true;
-                              setSendingStatus("Cancelling...");
-                            }}
-                            className="text-[10px] px-2 py-0.5 bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white border border-red-500/20 rounded-full transition-all"
-                            title="Cancel sending"
+                            disabled
+                            className="p-2 rounded-xl bg-[var(--sui-bg-tertiary)] text-[var(--sui-text-secondary)] cursor-not-allowed shrink-0"
                           >
-                            Cancel
+                            <RefreshCw className="animate-spin" size={20} />
+                          </button>
+                        ) : (messageText.trim() || selectedFiles.length > 0) ? (
+                          <button
+                            onClick={() => handleSendMessage()}
+                            className="p-2 rounded-xl bg-[var(--sui-blue)] text-white shadow-lg hover:scale-105 active:scale-95 transition-all duration-200 shrink-0"
+                            title="Send Message"
+                          >
+                            <Send size={20} />
+                          </button>
+                        ) : (
+                          <button
+                            onClick={startRecording}
+                            className="p-2 rounded-xl bg-[var(--sui-bg-tertiary)] text-[var(--sui-text)] hover:bg-[var(--sui-bg-tertiary)]/80 border border-[var(--sui-border)] transition-all duration-200 shrink-0"
+                            title="Record Audio"
+                          >
+                            <Mic size={20} />
                           </button>
                         )}
                       </div>
-                    )}
-
-                    <button
-                      onClick={handleSendMessage}
-                      disabled={(!messageText.trim() && selectedFiles.length === 0) || isSending}
-                      className={`p-2 rounded-xl transition-all duration-200 ${(messageText.trim() || selectedFiles.length > 0) && !isSending
-                        ? 'bg-[var(--sui-blue)] text-white shadow-lg hover:scale-105 active:scale-95'
-                        : 'bg-[var(--sui-bg-tertiary)] text-[var(--sui-text-secondary)] cursor-not-allowed'
-                        }`}
-                    >
-                      {isSending ? <RefreshCw className="animate-spin" size={20} /> : <Send size={20} />}
-                    </button>
-                  </div>
+                    </>
+                  )}
                 </div>
               </div>
-            </div >
+            </div>
           </>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center text-[var(--sui-text-secondary)]">
@@ -2598,18 +2746,33 @@ export function Chat() {
 
       {/* Video Preview Modal  */}
       {
-        showVideoModal && previewVideoSrc && (
+        showVideoModal && (previewVideoSrc || videoGallery.length > 0) && (
           <div
             className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-sm animate-in fade-in duration-200"
             onClick={() => {
               setShowVideoModal(false);
               setPreviewVideoSrc(null);
+              setVideoGallery([]);
             }}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                setShowVideoModal(false);
+                setPreviewVideoSrc(null);
+                setVideoGallery([]);
+              }
+              if (e.key === 'ArrowRight' && videoGallery.length > 1) {
+                setVideoGalleryIndex(prev => (prev + 1) % videoGallery.length);
+              }
+              if (e.key === 'ArrowLeft' && videoGallery.length > 1) {
+                setVideoGalleryIndex(prev => (prev - 1 + videoGallery.length) % videoGallery.length);
+              }
+            }}
+            tabIndex={0}
           >
             <div className="relative w-full max-w-4xl max-h-[90vh] flex items-center justify-center p-4" onClick={e => e.stopPropagation()}>
               <div className="w-full rounded-2xl overflow-hidden shadow-2xl border border-white/10 bg-black">
                 <CustomVideoPlayer
-                  src={previewVideoSrc}
+                  src={videoGallery.length > 0 ? videoGallery[videoGalleryIndex] : previewVideoSrc!}
                   className="max-h-[85vh]"
                   autoPlay={true}
                 />
@@ -2619,11 +2782,45 @@ export function Chat() {
                 onClick={() => {
                   setShowVideoModal(false);
                   setPreviewVideoSrc(null);
+                  setVideoGallery([]);
                 }}
                 className="absolute top-4 right-4 p-2 bg-black/50 hover:bg-black/70 text-white rounded-full backdrop-blur-md transition-all z-50"
               >
                 <X size={24} />
               </button>
+
+              {/* Navigation Arrows */}
+              {videoGallery.length > 1 && (
+                <>
+                  <button
+                    className="absolute left-4 top-1/2 -translate-y-1/2 p-2 text-white/50 hover:text-white transition-colors hover:bg-white/10 rounded-full z-50"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setVideoGalleryIndex(prev => (prev - 1 + videoGallery.length) % videoGallery.length);
+                    }}
+                  >
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M15 18l-6-6 6-6" />
+                    </svg>
+                  </button>
+                  <button
+                    className="absolute right-4 top-1/2 -translate-y-1/2 p-2 text-white/50 hover:text-white transition-colors hover:bg-white/10 rounded-full z-50"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setVideoGalleryIndex(prev => (prev + 1) % videoGallery.length);
+                    }}
+                  >
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M9 18l6-6-6-6" />
+                    </svg>
+                  </button>
+
+                  {/* Counter */}
+                  <div className="absolute bottom-[-40px] left-1/2 -translate-x-1/2 text-white/80 font-medium bg-black/50 px-3 py-1 rounded-full text-sm backdrop-blur-md">
+                    {videoGalleryIndex + 1} / {videoGallery.length}
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )
