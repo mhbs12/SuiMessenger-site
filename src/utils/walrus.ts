@@ -38,7 +38,7 @@ export async function uploadToWalrus(content: string, epochs: number = 1): Promi
 
         // Add timeout to prevent hanging uploads
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout for upload
+        const timeoutId = setTimeout(() => controller.abort(), 120000); // 120s timeout for upload
 
         // Upload to Walrus (store for 5 epochs)
         const response = await fetch(`${config.publisher}/v1/blobs?epochs=${epochs}`, {
@@ -65,9 +65,13 @@ export async function uploadToWalrus(content: string, epochs: number = 1): Promi
 
         const blobId = info.blobObject.blobId;
 
-        // Cache local para o remetente
+        // Cache local para o remetente (only if small enough)
         try {
-            localStorage.setItem(`walrus_cache_${blobId}`, content);
+            if (content.length <= 500000) {
+                localStorage.setItem(`walrus_cache_${blobId}`, content);
+            } else {
+                console.log(`Skipping localStorage cache for ${blobId} (size: ${content.length})`);
+            }
         } catch (e) {
             console.warn('Failed to cache to localStorage:', e);
         }
@@ -106,7 +110,7 @@ export async function downloadFromWalrus(blobId: string): Promise<string> {
 
             // Timeout curto para não travar muito tempo em um nó ruim
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 2000); // 2s timeout
+            const timeoutId = setTimeout(() => controller.abort(), 120000); // 120s timeout for download (increased for images)
 
             const response = await fetch(`${aggregatorUrl}/v1/blobs/${blobId}`, {
                 signal: controller.signal
@@ -118,8 +122,14 @@ export async function downloadFromWalrus(blobId: string): Promise<string> {
                 const content = await response.text();
                 console.log(`Download successful from ${aggregatorUrl}`);
 
-                // Cache it
-                localStorage.setItem(`walrus_cache_${blobId}`, content);
+                // Cache it (only if small enough)
+                try {
+                    if (content.length <= 500000) {
+                        localStorage.setItem(`walrus_cache_${blobId}`, content);
+                    }
+                } catch (e) {
+                    console.warn('Failed to cache downloaded content:', e);
+                }
                 return content;
             } else {
                 console.warn(`Aggregator ${aggregatorUrl} returned ${response.status}`);

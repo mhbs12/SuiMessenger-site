@@ -2,18 +2,18 @@ import { useState, useMemo, useEffect, useRef } from 'react';
 import { useCurrentAccount, useSuiClientQuery, useSignAndExecuteTransaction, ConnectButton, useSuiClient, useSignPersonalMessage, useDisconnectWallet } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
 import { PACKAGE_ID, CHAT_REGISTRY_ID } from '../constants';
-import { MessageSquare, Send, Search, MoreVertical, PlusCircle, RefreshCw, Clock, Sun, Moon, CheckCheck, Copy, Hourglass, Power, Play, Settings } from 'lucide-react';
+import { MessageSquare, Send, Search, MoreVertical, PlusCircle, RefreshCw, Clock, Sun, Moon, CheckCheck, Copy, Hourglass, Power, Play, Settings, Paperclip, X, Maximize2 } from 'lucide-react';
 import { uploadToWalrus, downloadFromWalrus } from '../utils/walrus';
 import { calculateContentHash, encryptMessage, decryptMessage, createSealSession } from '../utils/crypto';
 import { useSealSession } from '../hooks/useSealSession';
 import { useTheme } from '../context/ThemeContext';
 import { ReadReceipt } from './ReadReceipt';
 import { SettingsModal } from './SettingsModal';
+import { CustomVideoPlayer } from './CustomVideoPlayer';
 import { SessionTTLSelector } from './SessionTTLSelector';
 import { getCurrentTTLOption } from '../utils/session-preferences';
 import { bcs } from '@mysten/sui/bcs';
-import { fromHex, toHex, toHEX, normalizeSuiAddress } from '@mysten/sui/utils';
-import { getSwapQuote, buildSwapTransaction } from '../utils/swap';
+import { fromHex, toHex, normalizeSuiAddress } from '@mysten/sui/utils';
 const Address = bcs.bytes(32).transform({
   input: (val: string) => fromHex(val),
   output: (val) => toHex(val),
@@ -30,6 +30,7 @@ export function Chat() {
   // SEAL Session Management
   const { sessionKey, isReady: isSessionReady, isLoading: isSessionLoading, saveSession, expirationTimeMs, refresh: refreshSession } = useSealSession();
   const [isCreatingSession, setIsCreatingSession] = useState(false);
+  const [userEndedSession, setUserEndedSession] = useState(false);
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
   const [showSealModal, setShowSealModal] = useState(false);
   const [showEndSessionConfirm, setShowEndSessionConfirm] = useState(false);
@@ -40,6 +41,8 @@ export function Chat() {
   const [showSettings, setShowSettings] = useState(false);
   const [showDisconnectMenu, setShowDisconnectMenu] = useState(false);
   const [showTTLSelector, setShowTTLSelector] = useState(false);
+  const [showVideoModal, setShowVideoModal] = useState(false);
+  const [previewVideoSrc, setPreviewVideoSrc] = useState<string | null>(null);
   const attemptRef = useRef<string | null>(null);
 
   // Check for TTL preference on mount
@@ -57,11 +60,18 @@ export function Chat() {
 
 
 
+  // Mark session as "had" if it's ready (e.g. loaded from storage)
+  useEffect(() => {
+    if (isSessionReady) {
+      setHasHadSession(true);
+    }
+  }, [isSessionReady]);
+
   // Automatic Session Creation with Modal
   useEffect(() => {
     const initSession = async () => {
-      // Only auto-create if we haven't had a session yet in this page load
-      if (account && !isSessionLoading && !sessionKey && !isCreatingSession && isSessionReady === false && !hasHadSession) {
+      // Only auto-create if we haven't had a session yet in this page load AND user didn't explicitly end it
+      if (account && !isSessionLoading && !sessionKey && !isCreatingSession && isSessionReady === false && !hasHadSession && !userEndedSession) {
 
         if (attemptRef.current === account.address) {
           return; // Already attempted for this account
@@ -121,7 +131,7 @@ export function Chat() {
     };
 
     initSession();
-  }, [account, sessionKey, isCreatingSession, isSessionReady, isSessionLoading, signPersonalMessage, saveSession, hasHadSession]);
+  }, [account, sessionKey, isCreatingSession, isSessionReady, isSessionLoading, signPersonalMessage, saveSession, hasHadSession, userEndedSession]);
 
   // Calculate time remaining for session
   useEffect(() => {
@@ -167,6 +177,19 @@ export function Chat() {
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [epochs, setEpochs] = useState(1);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [filePreviews, setFilePreviews] = useState<{ type: 'image' | 'video', url: string }[]>([]);
+  const [showImageModal, setShowImageModal] = useState(false);
+  const [fullScreenImage, setFullScreenImage] = useState<string | null>(null);
+  const [galleryImages, setGalleryImages] = useState<string[]>([]);
+  const [galleryIndex, setGalleryIndex] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragCounter = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [messageLimit, setMessageLimit] = useState(20);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const prevScrollHeightRef = useRef<number | null>(null);
 
   // Map of Contact Address -> Chat ID
   const [chatIds, setChatIds] = useState<Record<string, string>>({});
@@ -178,6 +201,159 @@ export function Chat() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const cancelSendingRef = useRef(false);
+  const [sendingImagesCount, setSendingImagesCount] = useState(0);
+  const [showDownloadMenu, setShowDownloadMenu] = useState(false);
+
+  // Auto-resize textarea
+  const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    // If we are loading more messages (scrolling up), don't auto-scroll to bottom
+    if (isLoadingMore) return;
+
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior, block: 'end' });
+    }
+    setIsAtBottom(true);
+  };
+
+  const processImage = async (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          let width = img.width;
+          let height = img.height;
+          const MAX_DIMENSION = 2048;
+          if (width > height) {
+            if (width > MAX_DIMENSION) {
+              height *= MAX_DIMENSION / width;
+              width = MAX_DIMENSION;
+            }
+          } else {
+            if (height > MAX_DIMENSION) {
+              width *= MAX_DIMENSION / height;
+              height = MAX_DIMENSION;
+            }
+          }
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            reject(new Error('Failed to get canvas context'));
+            return;
+          }
+          ctx.drawImage(img, 0, 0, width, height);
+          const dataUrl = canvas.toDataURL('image/webp', 0.9);
+          resolve(dataUrl);
+        };
+        img.onerror = reject;
+        img.src = e.target?.result as string;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const newFiles: File[] = [];
+      Array.from(e.target.files).forEach(file => {
+        if (file.size > 50 * 1024 * 1024) {
+          alert(`File ${file.name} is too large. Max 50MB.`);
+          return;
+        }
+        newFiles.push(file);
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          if (e.target?.result) {
+            setFilePreviews(prev => [...prev, {
+              type: file.type.startsWith('video') ? 'video' : 'image',
+              url: e.target!.result as string
+            }]);
+          }
+        };
+        reader.readAsDataURL(file);
+      });
+      setSelectedFiles(prev => [...prev, ...newFiles]);
+    }
+  };
+
+  const clearImageSelection = () => {
+    setSelectedFiles([]);
+    setFilePreviews([]);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleScroll = () => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const { scrollTop, scrollHeight, clientHeight } = container;
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+    setIsAtBottom(distanceFromBottom < 100);
+
+    // Pagination Logic: Load more when near top
+    if (scrollTop < 50 && !isLoadingMore) {
+      // Check if we have more messages to load
+      const conversation = conversations.find((c: any) => c.address === selectedContact);
+      const totalMessages = conversation ? conversation.messages.length + optimisticMessages.length : 0;
+
+      if (messageLimit < totalMessages) {
+        console.log(`[Pagination] Loading more messages... Current: ${messageLimit}, Total: ${totalMessages}`);
+        setIsLoadingMore(true);
+        prevScrollHeightRef.current = scrollHeight;
+        setMessageLimit(prev => prev + 20);
+      }
+    }
+  };
+
+  // Restore scroll position after loading more messages
+  useEffect(() => {
+    if (isLoadingMore && prevScrollHeightRef.current !== null && messagesContainerRef.current) {
+      const container = messagesContainerRef.current;
+      const newScrollHeight = container.scrollHeight;
+      const heightDifference = newScrollHeight - prevScrollHeightRef.current;
+
+      // Adjust scroll position to maintain visual stability
+      container.scrollTop = heightDifference;
+
+      prevScrollHeightRef.current = null;
+      setIsLoadingMore(false);
+    }
+  }, [messageLimit]); // Run when messageLimit changes (and thus content renders)
+
+  // Reset pagination on contact change
+  useEffect(() => {
+    setMessageLimit(20);
+    setIsLoadingMore(false);
+    prevScrollHeightRef.current = null;
+  }, [selectedContact]);
+
+  // Handle dynamic content resizing (e.g. images loading)
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const observer = new ResizeObserver(() => {
+      // Only auto-scroll if we were ALREADY at the bottom AND not loading more
+      if (isAtBottom && !isLoadingMore) {
+        // Use 'auto' (instant) for resize events to prevent "fighting" the user or jitter
+        scrollToBottom('auto');
+      }
+    });
+
+    observer.observe(container);
+
+    if (messagesEndRef.current?.parentElement && messagesEndRef.current.parentElement !== container) {
+      observer.observe(messagesEndRef.current.parentElement);
+    }
+
+    return () => observer.disconnect();
+  }, [isAtBottom, isLoadingMore]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -296,13 +472,13 @@ export function Chat() {
       let hasChanges = false;
       readEvents.data.forEach((event: any) => {
         const parsed = event.parsedJson;
-        console.log("Processing Read Event:", parsed); // DEBUG LOG
+        // console.log("Processing Read Event:", parsed); // DEBUG LOG
         if (parsed) {
           // Handle both direct ID string and { id: string } object format
           const rawId = parsed.message_id;
           const messageId = typeof rawId === 'object' && rawId !== null && 'id' in rawId ? rawId.id : rawId;
 
-          console.log("Extracted Message ID:", messageId); // DEBUG LOG
+          // console.log("Extracted Message ID:", messageId); // DEBUG LOG
 
           if (messageId && !next.has(messageId)) {
             next.add(messageId);
@@ -339,6 +515,7 @@ export function Chat() {
 
     setUnreadCounts(counts);
   }, [events, readMessageIds, account]);
+
   // Conversations Grouping
   const conversations = useMemo(() => {
     if (!account) return [];
@@ -439,15 +616,27 @@ export function Chat() {
       m.sender === account?.address && m.recipient === selectedContact
     );
 
-    return [...optimistic, ...realMessages];
-  }, [selectedContact, conversations, optimisticMessages, account]);
+    const allMessages = [...optimistic, ...realMessages];
+    // Sort by timestamp descending (newest first)
+    const sortedMessages = allMessages.sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
+
+    // Pagination: Slice the messages
+    return sortedMessages.slice(0, messageLimit);
+  }, [selectedContact, conversations, optimisticMessages, account, messageLimit]);
 
   // Auto-scroll to bottom when chat opens or messages change
   useEffect(() => {
-    if (selectedContact) {
+    if (selectedContact && !isLoadingMore) {
       scrollToBottom();
     }
-  }, [selectedContact, activeMessages]);
+  }, [selectedContact, activeMessages]); // Warning: activeMessages changes on pagination, but isLoadingMore check prevents jump
+
+  // Decrypt Messages
+  // Keep ref in sync to avoid infinite loop in decryption effect
+  const decryptedMessagesRef = useRef(decryptedMessages);
+  useEffect(() => {
+    decryptedMessagesRef.current = decryptedMessages;
+  }, [decryptedMessages]);
 
   // Decrypt Messages
   useEffect(() => {
@@ -472,7 +661,8 @@ export function Chat() {
         const rawMsgId = msg.message_id || msg.id;
         const msgId = (typeof rawMsgId === 'string' ? rawMsgId : rawMsgId?.id) || msg.walrus_blob_id;
 
-        if (!msgId || decryptedMessages[msgId]) return;
+        // Use ref to check if already decrypted without adding to dependency array
+        if (!msgId || decryptedMessagesRef.current[msgId]) return;
 
         if (msg.walrus_blob_id) {
           try {
@@ -514,10 +704,10 @@ export function Chat() {
                 }));
               } catch (decryptError) {
                 console.error(`[SEAL] Decryption failed for ${msgId}:`, decryptError);
-                // Fallback: show encrypted content (shouldn't happen in normal flow)
+                // Fallback: Show error instead of raw encrypted content (which looks like symbols)
                 setDecryptedMessages(prev => ({
                   ...prev,
-                  [msgId]: encryptedContent
+                  [msgId]: "⚠️ Decryption Failed"
                 }));
               }
             } else {
@@ -566,7 +756,7 @@ export function Chat() {
       });
     };
     fetchMessages();
-  }, [activeMessages, decryptedMessages, sessionKey, isSessionReady, account, chatIds, selectedContact]);
+  }, [activeMessages, sessionKey, isSessionReady, account, chatIds, selectedContact]);
 
   // Remove Optimistic Messages
   useEffect(() => {
@@ -589,28 +779,7 @@ export function Chat() {
     setOptimisticMessages([]);
     setDecryptedMessages({});
     setChatIds({});
-    setUnreadCounts({});
   }, [account?.address]);
-
-  // Scroll Logic
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    setIsAtBottom(true);
-  };
-
-  const handleScroll = () => {
-    const container = messagesContainerRef.current;
-    if (!container) return;
-    const { scrollTop, scrollHeight, clientHeight } = container;
-    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
-    setIsAtBottom(distanceFromBottom < 100);
-  };
-
-  useEffect(() => {
-    if (isAtBottom) {
-      scrollToBottom();
-    }
-  }, [activeMessages.length, isAtBottom]);
 
   // Formatters
   const formatTime = (timestamp: string) => {
@@ -742,11 +911,6 @@ export function Chat() {
   const markMessagesAsRead = async (contactAddress: string) => {
     const chatId = chatIds[contactAddress];
     if (!chatId) return;
-
-    // Find unread messages to mark (we need at least one message to pass to the function?)
-    // Wait, messenger::mark_as_read takes `message: &mut Message` AND `chat: &mut Chat`.
-    // So we need to find an unread message object.
-    // We can query owned messages.
 
     // Fetch owned messages for this contact
     const owned = await suiClient.getOwnedObjects({
@@ -893,41 +1057,109 @@ export function Chat() {
       console.error("Error fetching chat ID:", e);
       return null;
     }
+
   };
 
   const { mutateAsync: signAndExecuteAsync } = useSignAndExecuteTransaction();
 
   const handleSendMessage = async () => {
-    if (!messageText || !selectedContact || !account) return;
+    if ((!messageText && selectedFiles.length === 0) || !selectedContact || !account) {
+      console.log("SendMessage: Missing required fields", { messageText, files: selectedFiles.length, selectedContact, account });
+      return;
+    }
 
-    const optimisticId = `temp_${Date.now()}`;
-    // ... (optimistic update logic remains same)
-    const optimisticMsg = {
-      id: { id: optimisticId },
-      sender: account.address,
-      recipient: selectedContact,
-      timestamp: Math.floor(Date.now() / 1000).toString(),
-      walrus_blob_id: optimisticId,
-      isSender: true,
-      isOptimistic: true
-    };
+    console.log("SendMessage: Starting...");
 
-    setOptimisticMessages(prev => [...prev, optimisticMsg]);
-    setDecryptedMessages(prev => ({
-      ...prev,
-      [optimisticId]: messageText
-    }));
+    // Reset Cancel Ref
+    cancelSendingRef.current = false;
+
+    const optimisticIds: string[] = [];
+    const newOptimisticMessages: any[] = [];
+
+    // 1. Create Optimistic Messages for Files
+    selectedFiles.forEach((file, index) => {
+      const id = `temp_file_${Date.now()}_${index}`;
+      optimisticIds.push(id);
+      newOptimisticMessages.push({
+        id: { id },
+        sender: account.address,
+        recipient: selectedContact,
+        timestamp: Math.floor(Date.now() / 1000).toString(),
+        walrus_blob_id: id,
+        isSender: true,
+        isOptimistic: true
+      });
+      // Set preview immediately
+      if (filePreviews[index]) {
+        const prefix = file.type.startsWith('video') ? 'VID:' : 'IMG:';
+        setDecryptedMessages(prev => ({
+          ...prev,
+          [id]: `${prefix}${filePreviews[index].url}`
+        }));
+      }
+    });
+
+    // 2. Create Optimistic Message for Text (if any)
+    let textOptimisticId: string | null = null;
+    if (messageText.trim()) {
+      textOptimisticId = `temp_text_${Date.now()}`;
+      optimisticIds.push(textOptimisticId);
+      newOptimisticMessages.push({
+        id: { id: textOptimisticId },
+        sender: account.address,
+        recipient: selectedContact,
+        timestamp: Math.floor(Date.now() / 1000).toString(),
+        walrus_blob_id: textOptimisticId,
+        isSender: true,
+        isOptimistic: true
+      });
+      setDecryptedMessages(prev => ({
+        ...prev,
+        [textOptimisticId!]: messageText
+      }));
+    }
+
+    setOptimisticMessages(prev => [...prev, ...newOptimisticMessages]);
 
     const messageToSend = messageText;
+    const imagesToProcess = [...selectedFiles]; // Capture ref
+
+    // Track if we are sending images for UI cancellation
+    setSendingImagesCount(imagesToProcess.length);
+
     setMessageText('');
+    clearImageSelection(); // Clear UI immediately
     setIsSending(true);
+
+    // Helper to check cancellation
+    const checkCancelled = () => {
+      if (cancelSendingRef.current) {
+        console.log("Sending cancelled by user");
+        // Restore State
+        if (messageToSend) setMessageText(messageToSend);
+        if (imagesToProcess.length > 0) {
+          setSelectedFiles(imagesToProcess);
+        }
+
+        // Remove Optimistic Messages
+        setOptimisticMessages(prev => prev.filter(m => !optimisticIds.includes(m.id.id)));
+
+        setIsSending(false);
+        setSendingStatus('');
+        setSendingImagesCount(0);
+        return true;
+      }
+      return false;
+    };
 
     try {
       // 1. Ensure we have a Chat ID (Scope for SEAL)
       let chatId = chatIds[selectedContact.toLowerCase()];
+      console.log("SendMessage: Initial Chat ID:", chatId);
 
       if (!chatId) {
         console.log("Chat ID not found in state, querying registry...");
+        setSendingStatus('Locating secure channel...');
         const fetchedId = await fetchChatId(selectedContact);
         if (fetchedId) {
           console.log("Found Chat ID in registry:", fetchedId);
@@ -936,12 +1168,17 @@ export function Chat() {
         }
       }
 
+      if (checkCancelled()) return;
+
       // If still no Chat ID, we must create the chat first
       if (!chatId) {
         if (!CHAT_REGISTRY_ID) throw new Error("Chat Registry ID not configured");
 
         console.log("Creating new chat to establish SEAL scope...");
-        setSendingStatus('Creating secure channel...');
+        setSendingStatus('Verifying secure channel...');
+        await new Promise(resolve => setTimeout(resolve, 800));
+
+        if (checkCancelled()) return;
 
         const createTx = new Transaction();
         createTx.moveCall({
@@ -952,11 +1189,13 @@ export function Chat() {
           ],
         });
 
+        console.log("SendMessage: Executing Create Chat Transaction...");
         const result = await signAndExecuteAsync({
           transaction: createTx as any,
         });
 
-        // Wait for transaction to be confirmed and get full details
+        // Wait for transaction and extract chat ID
+        console.log("SendMessage: Waiting for Create Chat Transaction...");
         const txDetails = await suiClient.waitForTransaction({
           digest: result.digest,
           options: { showEvents: true }
@@ -977,61 +1216,117 @@ export function Chat() {
         }
       }
 
-      // 2. Calculate content hash of the plaintext BEFORE encryption
-      // This hash will be used as the SEAL ID for both encryption and decryption
-      setSendingStatus('Preparing message...');
-      const plaintextHash = calculateContentHash(messageToSend);
-      console.log('[SEAL] Plaintext hash:', toHEX(plaintextHash).substring(0, 16) + '...');
+      if (checkCancelled()) return;
 
-      // 3. Encrypt Message using plaintext hash as SEAL ID
-      setSendingStatus('Encrypting message...');
-      const { encryptedContent } = await encryptMessage(messageToSend, chatId, plaintextHash);
+      const tx = new Transaction();
+      let hasActions = false;
 
-      // 4. Upload to Walrus (to get Blob ID and ensure availability)
-      setSendingStatus('Uploading to Walrus...');
-      const { blobId, info } = await uploadToWalrus(encryptedContent, epochs);
-      console.log('Uploaded to Walrus. Blob ID:', blobId);
+      // Process Files
+      for (let i = 0; i < imagesToProcess.length; i++) {
+        if (checkCancelled()) return;
 
-      setOptimisticMessages(prev => prev.map(m =>
-        m.id.id === optimisticId ? { ...m, walrus_blob_id: blobId } : m
-      ));
+        const file = imagesToProcess[i];
+        const isVideo = file.type.startsWith('video');
+        setSendingStatus(`Processing ${isVideo ? 'video' : 'image'} ${i + 1}/${imagesToProcess.length}...`);
+        console.log(`SendMessage: Processing file ${i + 1}/${imagesToProcess.length}`);
 
-      // 5. Atomic Swap & Send Logic
-      setSendingStatus('Calculating exchange rate...');
+        let content = '';
+        if (isVideo) {
+          // For video, we just read as DataURL (no compression for now as agreed)
+          content = await new Promise<string>((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              if (reader.result) resolve(`VID:${reader.result}`);
+            };
+            reader.readAsDataURL(file);
+          });
+        } else {
+          const webpDataUrl = await processImage(file);
+          content = `IMG:${webpDataUrl}`;
+        }
 
-      // Estimate storage cost (in WAL)
-      // In a real app, we'd parse this from 'info' or fetch from the publisher
-      // For now, we'll assume a standard cost based on size or a fixed amount for the demo
-      // 1 WAL = 1,000,000,000 MIST (if 9 decimals)
-      // Let's swap enough for the storage. 
-      // Note: If 'info' contains 'storageCost', use it.
-      const estimatedCost = info?.storageCost ? BigInt(info.storageCost) : 10000000n; // ~0.01 WAL default
+        if (checkCancelled()) return;
 
-      let tx = new Transaction();
+        // Encrypt
+        console.log(`SendMessage: Encrypting file ${i + 1}...`);
+        setSendingStatus(`Encrypting ${isVideo ? 'video' : 'image'}...`);
+        const plaintextHash = calculateContentHash(content);
+        const { encryptedContent } = await encryptMessage(content, chatId, plaintextHash);
 
-      try {
-        // Get Swap Quote (SUI -> WAL)
-        const quote = await getSwapQuote(estimatedCost, account.address);
-        console.log('Swap Quote:', quote);
+        if (checkCancelled()) return;
 
-        // Build Swap Transaction
-        // This adds the swap commands to 'tx'
-        await buildSwapTransaction(tx, quote, account.address);
-        console.log('Added swap commands to transaction');
-      } catch (swapError) {
-        console.error('Swap failed or not configured:', swapError);
-        // Fallback: Proceed without swap if it fails (e.g. testnet issues), 
-        // or throw if strict. For UX, we might warn but proceed if the user has WAL?
-        // But the user wanted "SUI only". So we should probably alert.
-        // For now, we'll log and proceed to Send Message, assuming the user might have WAL or we just skip the swap part.
-        // setErrorMessage("Auto-swap failed. Proceeding with message send...");
+        // Upload
+        console.log(`SendMessage: Uploading file ${i + 1} to Walrus...`);
+        setSendingStatus(`Uploading to Walrus...`);
+        const { blobId } = await uploadToWalrus(encryptedContent, epochs);
+        console.log(`SendMessage: Uploaded file ${i + 1}, Blob ID: ${blobId}`);
+
+        if (checkCancelled()) return;
+
+        // Update Optimistic Blob ID
+        const optId = optimisticIds[i];
+        setOptimisticMessages(prev => prev.map(m =>
+          m.id.id === optId ? { ...m, walrus_blob_id: blobId } : m
+        ));
+
+        // Add to Transaction
+        tx.moveCall({
+          target: `${PACKAGE_ID}::messenger::send_message`,
+          arguments: [
+            tx.object(chatId),
+            tx.pure.address(selectedContact),
+            tx.pure.string(blobId),
+            tx.pure.vector('u8', Array.from(plaintextHash)),
+            tx.pure.vector('u8', []),
+            tx.object('0x6'),
+          ],
+        });
+        hasActions = true;
       }
 
-      // 6. Add Send Message & Mark Read commands to the SAME transaction
-      setSendingStatus('Preparing transaction...');
+      // Process Text
+      if (messageToSend.trim()) {
+        if (checkCancelled()) return;
 
-      // First, mark any unread messages from this contact as read (if any)
+        console.log("SendMessage: Processing text message...");
+        setSendingStatus('Encrypting text...');
+        const content = messageToSend;
+        const plaintextHash = calculateContentHash(content);
+        const { encryptedContent } = await encryptMessage(content, chatId, plaintextHash);
+
+        if (checkCancelled()) return;
+
+        console.log("SendMessage: Uploading text to Walrus...");
+        setSendingStatus('Uploading to Walrus...');
+        const { blobId } = await uploadToWalrus(encryptedContent, epochs);
+        console.log("SendMessage: Text uploaded, Blob ID:", blobId);
+
+        if (checkCancelled()) return;
+
+        // Update Optimistic Blob ID
+        if (textOptimisticId) {
+          setOptimisticMessages(prev => prev.map(m =>
+            m.id.id === textOptimisticId ? { ...m, walrus_blob_id: blobId } : m
+          ));
+        }
+
+        tx.moveCall({
+          target: `${PACKAGE_ID}::messenger::send_message`,
+          arguments: [
+            tx.object(chatId),
+            tx.pure.address(selectedContact),
+            tx.pure.string(blobId),
+            tx.pure.vector('u8', Array.from(plaintextHash)),
+            tx.pure.vector('u8', []),
+            tx.object('0x6'),
+          ],
+        });
+        hasActions = true;
+      }
+
+      // Mark as Read Logic (Batch)
       if (unreadCounts[selectedContact.toLowerCase()] > 0) {
+        console.log("SendMessage: Adding Mark as Read commands...");
         try {
           const owned = await suiClient.getOwnedObjects({
             owner: account!.address,
@@ -1044,9 +1339,6 @@ export function Chat() {
             return fields && fields.sender === selectedContact && fields.is_read === false;
           });
 
-          console.log(`Adding ${unreadMsgs.length} mark_as_read calls to transaction`);
-
-          // Add mark_as_read calls to the same transaction (max 50 to avoid gas limit)
           unreadMsgs.slice(0, 50).forEach((msg: any) => {
             tx.moveCall({
               target: `${PACKAGE_ID}::messenger::mark_as_read`,
@@ -1062,23 +1354,18 @@ export function Chat() {
         }
       }
 
-      // Then, send the new message
-      tx.moveCall({
-        target: `${PACKAGE_ID}::messenger::send_message`,
-        arguments: [
-          tx.object(chatId),
-          tx.pure.address(selectedContact),
-          tx.pure.string(blobId),
-          tx.pure.vector('u8', Array.from(plaintextHash)), // Use plaintext hash
-          tx.pure.vector('u8', []), // encrypted_metadata
-          tx.object('0x6'), // clock
-        ],
-      });
+      if (hasActions) {
+        if (checkCancelled()) return;
 
-      setSendingStatus('Opening wallet...');
-      await signAndExecuteAsync({
-        transaction: tx as any,
-      });
+        console.log("SendMessage: Requesting Wallet Signature...");
+        setSendingStatus('Waiting for wallet signature...');
+        await signAndExecuteAsync({
+          transaction: tx as any,
+        });
+        console.log("SendMessage: Transaction Submitted!");
+      } else {
+        console.warn("SendMessage: No actions to perform in transaction");
+      }
 
       setSendingStatus('');
       refetchMessages();
@@ -1098,15 +1385,17 @@ export function Chat() {
       // Auto-clear error after 3 seconds
       setTimeout(() => setErrorMessage(null), 3000);
 
-      setOptimisticMessages(prev => prev.filter(m => m.id.id !== optimisticId));
+      // Clear optimistic messages on error
+      setOptimisticMessages(prev => prev.filter(m => !optimisticIds.includes(m.id.id)));
       setDecryptedMessages(prev => {
         const newState = { ...prev };
-        delete newState[optimisticId];
+        optimisticIds.forEach(id => delete newState[id]);
         return newState;
       });
       setSendingStatus('');
     } finally {
       setIsSending(false);
+      setSendingImagesCount(0);
     }
   };
 
@@ -1139,8 +1428,114 @@ export function Chat() {
     setTimeout(() => setCopiedAddress(null), 2000);
   };
 
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData.items;
+    const newFiles: File[] = [];
+
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf('image') !== -1 || items[i].type.indexOf('video') !== -1) {
+        const file = items[i].getAsFile();
+        if (file) {
+          if (file.size > 50 * 1024 * 1024) {
+            alert(`File ${file.name} is too large. Max 50MB.`);
+            continue;
+          }
+          newFiles.push(file);
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            if (reader.result) {
+              setFilePreviews(prev => [...prev, {
+                type: file.type.startsWith('video') ? 'video' : 'image',
+                url: reader.result as string
+              }]);
+            }
+          };
+          reader.readAsDataURL(file);
+        }
+      }
+    }
+
+    if (newFiles.length > 0) {
+      setSelectedFiles(prev => [...prev, ...newFiles]);
+      e.preventDefault();
+    }
+  };
+
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current += 1;
+    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+      setIsDragging(true);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current -= 1;
+    if (dragCounter.current === 0) {
+      setIsDragging(false);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    dragCounter.current = 0;
+
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const newFiles: File[] = [];
+      Array.from(e.dataTransfer.files).forEach(file => {
+        if (file.type.startsWith('image/') || file.type.startsWith('video/')) {
+          if (file.size > 50 * 1024 * 1024) {
+            alert(`File ${file.name} is too large. Max 50MB.`);
+            return;
+          }
+          newFiles.push(file);
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            if (reader.result) {
+              setFilePreviews(prev => [...prev, {
+                type: file.type.startsWith('video') ? 'video' : 'image',
+                url: reader.result as string
+              }]);
+            }
+          };
+          reader.readAsDataURL(file);
+        }
+      });
+
+      if (newFiles.length > 0) {
+        setSelectedFiles(prev => [...prev, ...newFiles]);
+      }
+    }
+  };
+
   return (
-    <div className="flex h-full w-full bg-[var(--sui-bg)] overflow-hidden">
+    <div
+      className="flex h-full w-full bg-[var(--sui-bg)] overflow-hidden relative"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      onPaste={handlePaste}
+    >
+      {/* Drag Overlay */}
+      {isDragging && (
+        <div className="absolute inset-0 z-50 bg-[var(--sui-blue)]/10 backdrop-blur-sm border-2 border-dashed border-[var(--sui-blue)] m-4 rounded-3xl flex flex-col items-center justify-center animate-in fade-in duration-200 pointer-events-none">
+          <div className="bg-[var(--sui-bg)] p-6 rounded-full shadow-xl mb-4">
+            <Paperclip size={48} className="text-[var(--sui-blue)] animate-bounce" />
+          </div>
+          <h3 className="text-2xl font-bold text-[var(--sui-text)]">Drop image to attach</h3>
+        </div>
+      )}
       {/* SIDEBAR */}
       <div className="w-[400px] bg-[var(--sui-bg-secondary)] border-r border-[var(--sui-border)] flex flex-col">
         {/* Header Sidebar */}
@@ -1176,13 +1571,25 @@ export function Chat() {
                 <span className={`text-xs font-medium tabular-nums ${timeRemaining === 'Expired' ? 'text-red-500' : 'text-[var(--sui-text)]'}`}>
                   {timeRemaining === 'Expired' ? 'Expired' : `${timeRemaining}`}
                 </span>
-                {timeRemaining !== 'Expired' && (
+                {timeRemaining !== 'Expired' ? (
                   <button
                     onClick={() => setShowEndSessionConfirm(true)}
                     className="ml-1 p-0.5 hover:bg-red-500/10 rounded-full text-[var(--sui-text-secondary)] hover:text-red-500 transition-all"
                     title="End Session"
                   >
                     <Power size={12} />
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setHasHadSession(false);
+                      setUserEndedSession(false);
+                      attemptRef.current = null;
+                    }}
+                    className="ml-1 p-0.5 hover:bg-[var(--sui-blue)]/10 rounded-full text-[var(--sui-blue)] transition-all"
+                    title="Restart Session"
+                  >
+                    <RefreshCw size={12} />
                   </button>
                 )}
               </div>
@@ -1192,9 +1599,10 @@ export function Chat() {
                 <button
                   onClick={() => {
                     setHasHadSession(false); // Reset flag to trigger auto-init
+                    setUserEndedSession(false); // Allow auto-init to run again
                     attemptRef.current = null; // Reset attempt ref to allow re-try
                   }}
-                  className="flex items-center gap-1.5 h-7 px-3 bg-[var(--sui-blue)] text-white rounded-full hover:opacity-90 transition-all shadow-sm"
+                  className="flex items-center gap-2.5 h-7 px-4 bg-[var(--sui-blue)] text-white rounded-full hover:opacity-90 transition-all shadow-sm"
                   title="Unlock secure session"
                 >
                   <Play size={10} fill="currentColor" />
@@ -1358,109 +1766,378 @@ export function Chat() {
               </div>
             </div>
 
-            {/* Messages Area */}
-            <div
-              ref={messagesContainerRef}
-              onScroll={handleScroll}
-              className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar relative"
-            >
-              {[...activeMessages].reverse().map((msg: any, index: number) => {
-                // Fix: Check for message_id first (from Event), then id (from Optimistic), then fallback
-                const rawMsgId = msg.message_id || msg.id;
-                const msgId = (typeof rawMsgId === 'string' ? rawMsgId : rawMsgId?.id) || msg.walrus_blob_id || `msg-${index}`;
-
-                const uniqueKey = `${msgId}-${index}`;
-                const content = decryptedMessages[msgId];
-                const isError = content === "⚠️ Failed to load content";
-
-                return (
-                  <div
-                    key={uniqueKey}
-                    className={`flex ${msg.isSender ? 'justify-end' : 'justify-start'} ${msg.isSender ? 'animate-fadeIn-sent' : 'animate-fadeIn-received'
-                      }`}
-                  >
-                    <div
-                      className={`max-w-[60%] rounded-2xl p-3 px-4 shadow-lg relative backdrop-blur-sm ${msg.isSender
-                        ? 'bg-gradient-to-br from-[var(--sui-blue)] to-[var(--sui-cyan)] text-white rounded-br-none'
-                        : 'glass-card text-[var(--sui-text)] rounded-bl-none'
-                        } ${msg.isOptimistic ? 'animate-optimistic' : ''}`}
-                    >
-                      <p className="text-sm break-all whitespace-pre-wrap">
-                        {content && !isError ? (
-                          <span>{content}</span>
-                        ) : (
-                          msg.walrus_blob_id ? (
-                            isError ? (
-                              <span
-                                className="text-red-300 text-xs flex items-center gap-1 cursor-pointer hover:underline"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  retryDownload(msgId, msg.walrus_blob_id);
-                                }}
-                                title="Click to retry download"
-                              >
-                                <RefreshCw size={12} /> Failed to load (Click to retry)
-                              </span>
-                            ) : (
-                              !isSessionReady && !sessionKey ? (
-                                <span className="text-orange-400 text-xs flex items-center gap-2">
-                                  <Hourglass size={12} className="opacity-70" />
-                                  <span>Please start a session to decrypt messages</span>
-                                </span>
-                              ) : (
-                                <span className="italic text-gray-300 text-xs flex items-center gap-1">
-                                  <RefreshCw className="animate-spin" size={10} /> Loading content...
-                                </span>
-                              )
-                            )
-                          ) : 'Message content unavailable'
-                        )}
-                      </p>
-                      <div className={`text-[10px] mt-1 flex justify-end items-center gap-1 ${msg.isSender ? 'text-white/70' : 'text-[var(--sui-text-secondary)]'
-                        }`}>
-                        {msg.isOptimistic && (
-                          <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                          </svg>
-                        )}
-                        {formatTime(msg.timestamp)}
-                        {msg.isSender && (
-                          <ReadReceipt isRead={readMessageIds.has(msgId) || msg.is_read} />
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-              <div ref={messagesEndRef} />
-
-
-            </div>
-
-            {!isAtBottom && (
-              <button
-                onClick={scrollToBottom}
-                className="absolute bottom-32 right-6 sui-gradient text-white p-3 rounded-full shadow-2xl hover:scale-110 transition-transform z-10 glow-effect"
-                title="Go to recent messages"
+            {/* Messages Area Wrapper */}
+            <div className="flex-1 relative min-h-0">
+              <div
+                ref={messagesContainerRef}
+                onScroll={handleScroll}
+                className="absolute inset-0 overflow-y-auto p-4 space-y-4 custom-scrollbar"
               >
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
-                </svg>
-              </button>
-            )}
+                {(() => {
+                  // Grouping Logic
+                  const reversedMessages = [...activeMessages].reverse().map((msg, i) => ({ msg, index: i }));
+                  const groupedMessages: { type: 'image-group' | 'single', items: { msg: any, index: number }[], textItem?: { msg: any, index: number } }[] = [];
+                  let i = 0;
+
+                  const getMsgId = (msg: any, idx: number) => {
+                    const rawMsgId = msg.message_id || msg.id;
+                    return (typeof rawMsgId === 'string' ? rawMsgId : rawMsgId?.id) || msg.walrus_blob_id || `msg-${idx}`;
+                  };
+
+                  while (i < reversedMessages.length) {
+                    const currentItem = reversedMessages[i];
+                    const batch = [currentItem];
+                    let j = i + 1;
+
+                    // Group by Sender + Timestamp
+                    while (j < reversedMessages.length) {
+                      const nextItem = reversedMessages[j];
+                      if (nextItem.msg.sender === currentItem.msg.sender && nextItem.msg.timestamp === currentItem.msg.timestamp) {
+                        batch.push(nextItem);
+                        j++;
+                      } else {
+                        break;
+                      }
+                    }
+
+                    // Separate Images and Text (including Videos in images for grouping)
+                    const images: typeof batch = [];
+                    const texts: typeof batch = [];
+
+                    for (const item of batch) {
+                      const msgId = getMsgId(item.msg, item.index);
+                      const content = decryptedMessages[msgId];
+                      if (content && !content.startsWith('⚠️') && (content.startsWith('IMG:') || content.startsWith('VID:'))) {
+                        images.push(item);
+                      } else {
+                        texts.push(item);
+                      }
+                    }
+
+                    if (images.length > 0) {
+                      // Image Group (with optional caption)
+                      const captionItem = texts.length > 0 ? texts[0] : undefined;
+                      groupedMessages.push({ type: 'image-group', items: images, textItem: captionItem });
+                    } else {
+                      // No images, render all as singles
+                      for (const item of batch) {
+                        groupedMessages.push({ type: 'single', items: [item] });
+                      }
+                    }
+                    i = j;
+                  }
+
+                  return groupedMessages.map((group, groupIndex) => {
+                    const firstItem = group.items[0];
+                    const msg = firstItem.msg;
+                    const isSender = msg.isSender;
+
+                    if (group.type === 'image-group') {
+                      // Render Grid (Oldest to Newest)
+                      const gridItems = [...group.items].reverse();
+                      const msgId = getMsgId(msg, firstItem.index); // ID for status
+                      const count = gridItems.length;
+
+                      // Extract all sources for gallery
+                      const allSources = gridItems.map(item => {
+                        const mId = getMsgId(item.msg, item.index);
+                        const content = decryptedMessages[mId];
+                        return content?.substring(4).split('|||')[0] || '';
+                      }).filter(src => src);
+
+                      // Truncate for display
+                      const visibleItems = gridItems.slice(0, 4);
+                      const remainingCount = count - 4;
+
+                      // Caption Logic
+                      let captionText: string | null = null;
+                      if (group.textItem) {
+                        const txtId = getMsgId(group.textItem.msg, group.textItem.index);
+                        const txtContent = decryptedMessages[txtId];
+                        if (txtContent && !txtContent.startsWith('IMG:') && !txtContent.startsWith('VID:') && txtContent !== "⚠️ Failed to load content") {
+                          captionText = txtContent;
+                        }
+                      }
+
+                      return (
+                        <div key={`group-${groupIndex}`} className={`flex ${isSender ? 'justify-end' : 'justify-start'} ${isSender ? 'animate-fadeIn-sent' : 'animate-fadeIn-received'}`}>
+                          <div className={`relative max-w-[70%] md:max-w-md rounded-2xl shadow-lg flex flex-col p-1 border border-white/20 ${isSender ? 'bg-gradient-to-br from-[var(--sui-blue)] to-[var(--sui-cyan)] rounded-br-none' : 'glass-card rounded-bl-none'}`}>
+                            <div className={`grid gap-0.5 rounded-xl overflow-hidden border border-white/20 ${visibleItems.length === 1 ? 'grid-cols-1' : 'grid-cols-2'}`}>
+                              {visibleItems.map((item, idx) => {
+                                const mId = getMsgId(item.msg, item.index);
+                                const content = decryptedMessages[mId];
+                                const isVideo = content?.startsWith('VID:');
+                                const src = content?.substring(4).split('|||')[0];
+
+                                // Layout Logic
+                                let itemClass = "relative cursor-pointer group overflow-hidden";
+                                if (visibleItems.length === 1 && isVideo) {
+                                  itemClass += " aspect-video"; // 16:9 for single video
+                                } else if (visibleItems.length === 3 && idx === 0) {
+                                  itemClass += " col-span-2 aspect-[2/1]";
+                                } else {
+                                  itemClass += " aspect-square";
+                                }
+
+                                const isLastItem = idx === 3;
+                                const showOverlay = isLastItem && remainingCount > 0;
+
+                                return (
+                                  <div key={idx} className={itemClass} onClick={() => {
+                                    if (isVideo) {
+                                      setPreviewVideoSrc(src);
+                                      setShowVideoModal(true);
+                                    } else {
+                                      setGalleryImages(allSources);
+                                      setGalleryIndex(idx);
+                                      setShowImageModal(true);
+                                    }
+                                  }}>
+                                    {isVideo ? (
+                                      <div className="w-full h-full bg-black flex items-center justify-center relative">
+                                        <video src={src} className="w-full h-full object-cover opacity-80" />
+                                        <div className="absolute inset-0 flex items-center justify-center">
+                                          <div className="bg-white/20 p-2 rounded-full backdrop-blur-sm group-hover:scale-110 transition-transform">
+                                            <Play className="text-white fill-current" size={24} />
+                                          </div>
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <img src={src} alt="Preview" className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-110" />
+                                    )}
+
+                                    {/* Hover Overlay */}
+                                    <div className={`absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100 ${showOverlay ? 'hidden' : ''}`}>
+                                      <Maximize2 className="text-white drop-shadow-md" size={20} />
+                                    </div>
+
+                                    {/* +N Overlay */}
+                                    {showOverlay && (
+                                      <div className="absolute inset-0 bg-black/50 flex items-center justify-center backdrop-blur-[2px] transition-colors hover:bg-black/60">
+                                        <span className="text-white text-2xl font-bold drop-shadow-md">+{remainingCount}</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                )
+                              })}
+                            </div>
+
+                            {/* Caption Area */}
+                            {captionText && (
+                              <div className={`pt-2 px-3 pb-0 ${isSender ? 'text-white' : 'text-[var(--sui-text)]'}`}>
+                                <p className="text-sm break-all whitespace-pre-wrap">{captionText}</p>
+                              </div>
+                            )}
+
+                            {/* Timestamp & Status Footer */}
+                            <div className={`text-[10px] px-2 py-1 flex justify-end items-center gap-1 ${isSender ? 'text-white/90' : 'text-[var(--sui-text-secondary)]'}`}>
+                              {msg.isOptimistic && (
+                                <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                              )}
+                              {formatTime(msg.timestamp)}
+                              {isSender && <ReadReceipt isRead={readMessageIds.has(msgId) || msg.is_read} />}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    } else {
+                      // Render Single Message (Original Logic)
+                      const item = group.items[0];
+                      const msg = item.msg;
+                      const index = item.index;
+
+                      const rawMsgId = msg.message_id || msg.id;
+                      const msgId = (typeof rawMsgId === 'string' ? rawMsgId : rawMsgId?.id) || msg.walrus_blob_id || `msg-${index}`;
+
+                      const uniqueKey = `${msgId}-${index}`;
+                      const content = decryptedMessages[msgId];
+                      const isError = content === "⚠️ Failed to load content";
+
+                      // Parse Content for Image/Video + Caption
+                      let imageSrc: string | null = null;
+                      let videoSrc: string | null = null;
+                      let captionText: string | null = null;
+
+                      if (content && !isError) {
+                        if (content.startsWith('IMG:')) {
+                          const parts = content.split('|||');
+                          imageSrc = parts[0].substring(4); // Remove IMG:
+                          if (parts.length > 1) {
+                            captionText = parts.slice(1).join('|||'); // Rejoin rest in case caption has separator
+                          }
+                        } else if (content.startsWith('VID:')) {
+                          const parts = content.split('|||');
+                          videoSrc = parts[0].substring(4); // Remove VID:
+                          if (parts.length > 1) {
+                            captionText = parts.slice(1).join('|||');
+                          }
+                        } else {
+                          captionText = content;
+                        }
+                      }
+
+                      return (
+                        <div
+                          key={uniqueKey}
+                          className={`flex ${msg.isSender ? 'justify-end' : 'justify-start'} ${msg.isSender ? 'animate-fadeIn-sent' : 'animate-fadeIn-received'
+                            }`}
+                        >
+                          <div
+                            className={`max-w-[70%] ${imageSrc || videoSrc ? 'md:max-w-md' : 'md:max-w-2xl'} rounded-2xl shadow-lg relative backdrop-blur-sm flex flex-col overflow-hidden ${msg.isSender
+                              ? 'bg-gradient-to-br from-[var(--sui-blue)] to-[var(--sui-cyan)] text-white rounded-br-none'
+                              : 'glass-card text-[var(--sui-text)] rounded-bl-none'
+                              } ${msg.isOptimistic ? 'animate-optimistic' : ''}`}
+                          >
+                            {/* Video Part */}
+                            {videoSrc && (
+                              <div className="relative p-1">
+                                <CustomVideoPlayer
+                                  src={videoSrc}
+                                  className="rounded-xl border border-white/10 shadow-sm"
+                                />
+                              </div>
+                            )}
+
+                            {/* Image Part */}
+                            {imageSrc && (
+                              <div className="relative group cursor-pointer p-1" onClick={() => {
+                                setFullScreenImage(imageSrc);
+                                setShowImageModal(true);
+                              }}>
+                                <div className="relative overflow-hidden rounded-xl border border-white/10 shadow-sm">
+                                  <img
+                                    src={imageSrc}
+                                    alt="Encrypted Image"
+                                    className="w-full max-h-[400px] object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+                                  />
+                                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100">
+                                    <Maximize2 className="text-white drop-shadow-md" />
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Text Part */}
+                            {(captionText || (!imageSrc && !content)) && (
+                              <div className={`p-3 px-4 ${imageSrc ? 'pt-2' : ''}`}>
+                                <p className="text-sm break-all whitespace-pre-wrap">
+                                  {captionText || (
+                                    msg.walrus_blob_id ? (
+                                      isError ? (
+                                        <span
+                                          className="text-red-300 text-xs flex items-center gap-1 cursor-pointer hover:underline"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            retryDownload(msgId, msg.walrus_blob_id);
+                                          }}
+                                          title="Click to retry download"
+                                        >
+                                          <RefreshCw size={12} /> Failed to load (Click to retry)
+                                        </span>
+                                      ) : (
+                                        !isSessionReady && !sessionKey ? (
+                                          <span className="text-orange-400 text-xs flex items-center gap-2">
+                                            <Hourglass size={12} className="opacity-70" />
+                                            <span>Please start a session to decrypt messages</span>
+                                          </span>
+                                        ) : (
+                                          <span className="italic text-gray-300 text-xs flex items-center gap-1">
+                                            <RefreshCw className="animate-spin" size={10} /> Loading content...
+                                          </span>
+                                        )
+                                      )
+                                    ) : 'Message content unavailable'
+                                  )}
+                                </p>
+                              </div>
+                            )}
+
+                            <div className={`text-[10px] px-3 pb-2 flex justify-end items-center gap-1 ${msg.isSender ? 'text-white/70' : 'text-[var(--sui-text-secondary)]'
+                              }`}>
+                              {msg.isOptimistic && (
+                                <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                              )}
+                              {formatTime(msg.timestamp)}
+                              {msg.isSender && (
+                                <ReadReceipt isRead={readMessageIds.has(msgId) || msg.is_read} />
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    }
+                  });
+                })()
+                }
+                <div ref={messagesEndRef} />
+              </div >
+
+              {!isAtBottom && (
+                <button
+                  onClick={() => scrollToBottom()}
+                  className="absolute bottom-6 right-6 sui-gradient text-white p-3 rounded-full shadow-2xl hover:scale-110 transition-transform z-10 glow-effect"
+                  title="Go to recent messages"
+                >
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                  </svg>
+                </button>
+              )}
+            </div >
 
             {/* Input Area */}
-            <div className="bg-[var(--sui-bg-tertiary)] p-3 flex flex-col shrink-0 border-t border-[var(--sui-border)]">
-              {sendingStatus && (
-                <div className="mb-2 text-xs text-[var(--sui-blue)] flex items-center gap-2">
-                  <RefreshCw className="animate-spin" size={12} />
-                  {sendingStatus}
-                </div>
-              )}
+            < div className="bg-[var(--sui-bg-tertiary)] p-3 flex flex-col shrink-0 border-t border-[var(--sui-border)] relative" >
+              <div className="flex items-end gap-3 relative">
+                <div className="flex-1 bg-[var(--sui-bg-secondary)] border border-[var(--sui-border)] rounded-2xl flex flex-col transition-all focus-within:border-[var(--sui-blue)] focus-within:ring-1 focus-within:ring-[var(--sui-blue)] transition-all relative">
 
-              <div className="flex items-end gap-3">
-                <div className="flex-1 bg-[var(--sui-bg-secondary)] border border-[var(--sui-border)] rounded-2xl flex flex-col transition-all focus-within:border-[var(--sui-blue)] focus-within:ring-1 focus-within:ring-[var(--sui-blue)] transition-all">
+                  {/* Integrated File Preview */}
+                  {filePreviews.length > 0 && (
+                    <div className="p-3 pb-0 animate-in slide-in-from-bottom-2 fade-in duration-200 flex gap-2 overflow-x-auto custom-scrollbar">
+                      {filePreviews.map((preview, index) => (
+                        <div key={index} className="relative inline-block group shrink-0">
+                          {preview.type === 'video' ? (
+                            <div
+                              className="h-20 w-32 rounded-lg border border-[var(--sui-border)] bg-black flex items-center justify-center overflow-hidden relative cursor-pointer hover:opacity-90 transition-opacity"
+                              onClick={() => {
+                                setPreviewVideoSrc(preview.url);
+                                setShowVideoModal(true);
+                              }}
+                            >
+                              <video src={preview.url} className="h-full w-full object-cover opacity-60" />
+                              <div className="absolute inset-0 flex items-center justify-center">
+                                <div className="bg-white/20 p-1.5 rounded-full backdrop-blur-sm">
+                                  <svg className="w-6 h-6 text-white fill-current" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <img
+                              src={preview.url}
+                              alt={`Preview ${index}`}
+                              className="h-20 w-auto rounded-lg border border-[var(--sui-border)] object-cover shadow-sm"
+                            />
+                          )}
+                          <button
+                            onClick={() => {
+                              setSelectedFiles(prev => prev.filter((_, i) => i !== index));
+                              setFilePreviews(prev => prev.filter((_, i) => i !== index));
+                            }}
+                            className="absolute -top-2 -right-2 bg-[var(--sui-bg-tertiary)] text-[var(--sui-text-secondary)] border border-[var(--sui-border)] rounded-full p-1 hover:bg-red-500 hover:text-white hover:border-red-500 shadow-sm transition-all opacity-0 group-hover:opacity-100"
+                            title="Remove file"
+                          >
+                            <X size={12} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
                   <textarea
                     ref={textareaRef}
                     placeholder="Type a message..."
@@ -1477,6 +2154,26 @@ export function Chat() {
                   />
                   <div className="flex justify-between items-center px-2 pb-2">
                     <div className="flex items-center gap-2">
+                      <div className="relative" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="file"
+                          ref={fileInputRef}
+                          onChange={handleFileSelect}
+                          accept="image/*,video/*"
+                          multiple
+                          className="hidden"
+                        />
+                        <button
+                          className={`p-1.5 rounded-lg transition-all flex items-center gap-1 ${selectedFiles.length > 0
+                            ? 'text-[var(--sui-blue)] bg-[var(--sui-blue)]/10'
+                            : 'text-[var(--sui-text-secondary)] hover:text-[var(--sui-blue)] hover:bg-[var(--sui-bg-tertiary)]'}`}
+                          title="Attach File"
+                          onClick={() => fileInputRef.current?.click()}
+                        >
+                          <Paperclip size={18} />
+                        </button>
+                      </div>
+
                       <div className="relative" onClick={(e) => e.stopPropagation()}>
                         <button
                           className="p-1.5 text-[var(--sui-text-secondary)] hover:text-[var(--sui-blue)] hover:bg-[var(--sui-bg-tertiary)] rounded-lg transition-all flex items-center gap-1"
@@ -1521,10 +2218,31 @@ export function Chat() {
                         )}
                       </div>
                     </div>
+
+                    {sendingStatus && (
+                      <div className="flex-1 flex justify-end items-center px-3 animate-in fade-in duration-300 gap-2">
+                        <span className="text-[10px] font-medium text-[var(--sui-blue)] animate-pulse tracking-wide">
+                          {sendingStatus}
+                        </span>
+                        {isSending && sendingImagesCount > 0 && (
+                          <button
+                            onClick={() => {
+                              cancelSendingRef.current = true;
+                              setSendingStatus("Cancelling...");
+                            }}
+                            className="text-[10px] px-2 py-0.5 bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white border border-red-500/20 rounded-full transition-all"
+                            title="Cancel sending"
+                          >
+                            Cancel
+                          </button>
+                        )}
+                      </div>
+                    )}
+
                     <button
                       onClick={handleSendMessage}
-                      disabled={!messageText.trim() || isSending}
-                      className={`p-2 rounded-xl transition-all duration-200 ${messageText.trim() && !isSending
+                      disabled={(!messageText.trim() && selectedFiles.length === 0) || isSending}
+                      className={`p-2 rounded-xl transition-all duration-200 ${(messageText.trim() || selectedFiles.length > 0) && !isSending
                         ? 'bg-[var(--sui-blue)] text-white shadow-lg hover:scale-105 active:scale-95'
                         : 'bg-[var(--sui-bg-tertiary)] text-[var(--sui-text-secondary)] cursor-not-allowed'
                         }`}
@@ -1534,7 +2252,7 @@ export function Chat() {
                   </div>
                 </div>
               </div>
-            </div>
+            </div >
           </>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center text-[var(--sui-text-secondary)]">
@@ -1544,167 +2262,373 @@ export function Chat() {
             <h2 className="text-xl font-semibold text-[var(--sui-text)] mb-2">Select a chat</h2>
             <p>Choose a contact to start messaging</p>
           </div>
-        )}
-      </div>
+        )
+        }
+      </div >
 
-      {/* SEAL Session Modal - Blocks app until signature accepted  */}
+      {/* SEAL Session Modal - Blocks app until signature accepted   */}
+      {
+        showSealModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: 'rgba(0, 0, 0, 0.85)' }}>
+            <div className="bg-[var(--sui-bg-secondary)] rounded-lg p-8 max-w-md mx-4 border border-[var(--sui-border)] shadow-2xl">
+              <div className="text-center">
+                <div className="w-16 h-16 bg-gradient-to-br from-[var(--sui-blue)] to-[var(--sui-purple)] rounded-full flex items-center justify-center mx-auto mb-4">
+                  <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                  </svg>
+                </div>
 
-      {showSealModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: 'rgba(0, 0, 0, 0.85)' }}>
-          <div className="bg-[var(--sui-bg-secondary)] rounded-lg p-8 max-w-md mx-4 border border-[var(--sui-border)] shadow-2xl">
-            <div className="text-center">
-              <div className="w-16 h-16 bg-gradient-to-br from-[var(--sui-blue)] to-[var(--sui-purple)] rounded-full flex items-center justify-center mx-auto mb-4">
-                <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                </svg>
+                <h2 className="text-2xl font-bold text-[var(--sui-text)] mb-2">🔐 Secure Session Required</h2>
+                <p className="text-[var(--sui-text-secondary)] mb-6">
+                  Please accept the signature request in your wallet to create an encrypted session.
+                  <br /><br />
+                  This allows you to decrypt messages without signing every time.
+                </p>
+
+                {sealError ? (
+                  <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 mb-4">
+                    <p className="text-red-400 text-sm mb-2">{sealError}</p>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-center gap-3 text-[var(--sui-text-secondary)]">
+                    <RefreshCw className="animate-spin" size={20} />
+                    <span>Waiting for signature...</span>
+                  </div>
+                )}
               </div>
+            </div>
+          </div>
+        )
+      }
 
-              <h2 className="text-2xl font-bold text-[var(--sui-text)] mb-2">🔐 Secure Session Required</h2>
-              <p className="text-[var(--sui-text-secondary)] mb-6">
-                Please accept the signature request in your wallet to create an encrypted session.
-                <br /><br />
-                This allows you to decrypt messages without signing every time.
+      {/* End Session Confirmation Modal  */}
+      {
+        showEndSessionConfirm && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: 'rgba(0, 0, 0, 0.6)' }}>
+            <div className="bg-[var(--sui-bg-secondary)] rounded-xl p-6 max-w-sm mx-4 border border-[var(--sui-border)] shadow-2xl animate-in zoom-in-95 duration-200">
+              <h3 className="text-lg font-semibold text-[var(--sui-text)] mb-2">End Session?</h3>
+              <p className="text-sm text-[var(--sui-text-secondary)] mb-6">
+                You will need to sign a new transaction to decrypt messages again.
               </p>
-
-              {sealError ? (
-                <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 mb-4">
-                  <p className="text-red-400 text-sm mb-2">{sealError}</p>
-                </div>
-              ) : (
-                <div className="flex items-center justify-center gap-3 text-[var(--sui-text-secondary)]">
-                  <RefreshCw className="animate-spin" size={20} />
-                  <span>Waiting for signature...</span>
-                </div>
-              )}
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => setShowEndSessionConfirm(false)}
+                  className="px-4 py-2 rounded-lg text-sm font-medium text-[var(--sui-text)] hover:bg-[var(--sui-bg-tertiary)] transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    refreshSession();
+                    setUserEndedSession(true); // Prevent auto-restart
+                    setShowEndSessionConfirm(false);
+                  }}
+                  className="px-4 py-2 rounded-lg text-sm font-medium bg-red-500 text-white hover:bg-red-600 transition-colors shadow-lg shadow-red-500/20"
+                >
+                  End Session
+                </button>
+              </div>
             </div>
           </div>
-        </div>
+        )
+      }
 
-      )}
-
-      {/* End Session Confirmation Modal */}
-      {showEndSessionConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: 'rgba(0, 0, 0, 0.6)' }}>
-          <div className="bg-[var(--sui-bg-secondary)] rounded-xl p-6 max-w-sm mx-4 border border-[var(--sui-border)] shadow-2xl animate-in zoom-in-95 duration-200">
-            <h3 className="text-lg font-semibold text-[var(--sui-text)] mb-2">End Session?</h3>
-            <p className="text-sm text-[var(--sui-text-secondary)] mb-6">
-              You will need to sign a new transaction to decrypt messages again.
-            </p>
-            <div className="flex justify-end gap-3">
-              <button
-                onClick={() => setShowEndSessionConfirm(false)}
-                className="px-4 py-2 rounded-lg text-sm font-medium text-[var(--sui-text)] hover:bg-[var(--sui-bg-tertiary)] transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  refreshSession();
-                  setShowEndSessionConfirm(false);
-                }}
-                className="px-4 py-2 rounded-lg text-sm font-medium bg-red-500 text-white hover:bg-red-600 transition-colors shadow-lg shadow-red-500/20"
-              >
-                End Session
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Settings Modal */}
+      {/* Settings Modal  */}
       <SettingsModal
         isOpen={showSettings}
         onClose={() => setShowSettings(false)}
         onEndSession={() => setShowEndSessionConfirm(true)}
       />
 
-      {/* TTL Selector Modal - First Time Setup */}
-      {showTTLSelector && (
-        <SessionTTLSelector
-          isOpen={showTTLSelector}
-          onConfirm={() => {
-            setShowTTLSelector(false);
-            setHasHadSession(false); // Trigger session creation
-            attemptRef.current = null;
-          }}
-        />
-      )}
+      {/* TTL Selector Modal - First Time Setup  */}
+      {
+        showTTLSelector && (
+          <SessionTTLSelector
+            isOpen={showTTLSelector}
+            onConfirm={() => {
+              setShowTTLSelector(false);
+              setHasHadSession(false); // Trigger session creation
+              attemptRef.current = null;
+            }}
+          />
+        )
+      }
 
-      {/* Disconnect Confirmation Modal */}
-      {showDisconnectMenu && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: 'rgba(0, 0, 0, 0.6)' }}>
-          <div className="bg-[var(--sui-bg-secondary)] rounded-xl p-6 max-w-sm mx-4 border border-[var(--sui-border)] shadow-2xl animate-in zoom-in-95 duration-200">
-            <h3 className="text-lg font-semibold text-[var(--sui-text)] mb-2">Disconnect Wallet?</h3>
-            <p className="text-sm text-[var(--sui-text-secondary)] mb-6">
-              {sessionKey
-                ? "This will end your current secure session and disconnect your wallet."
-                : "Are you sure you want to disconnect your wallet?"}
-            </p>
-            <div className="flex justify-end gap-3">
+      {/* Disconnect Confirmation Modal  */}
+      {
+        showDisconnectMenu && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: 'rgba(0, 0, 0, 0.6)' }}>
+            <div className="bg-[var(--sui-bg-secondary)] rounded-xl p-6 max-w-sm mx-4 border border-[var(--sui-border)] shadow-2xl animate-in zoom-in-95 duration-200">
+              <h3 className="text-lg font-semibold text-[var(--sui-text)] mb-2">Disconnect Wallet?</h3>
+              <p className="text-sm text-[var(--sui-text-secondary)] mb-6">
+                {sessionKey
+                  ? "This will end your current secure session and disconnect your wallet."
+                  : "Are you sure you want to disconnect your wallet?"}
+              </p>
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => setShowDisconnectMenu(false)}
+                  className="px-4 py-2 rounded-lg text-sm font-medium text-[var(--sui-text-secondary)] hover:bg-[var(--sui-bg-tertiary)] transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    if (sessionKey) {
+                      refreshSession(); // End session first
+                    }
+                    disconnect(); // Then disconnect wallet
+                    setShowDisconnectMenu(false);
+                  }}
+                  className="px-4 py-2 rounded-lg text-sm font-medium bg-red-500 text-white hover:bg-red-600 transition-colors shadow-lg shadow-red-500/20"
+                >
+                  Disconnect
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      }
+
+      {/* Error Toast Notification  */}
+      {
+        errorMessage && (
+          <div className="fixed top-6 right-6 z-50 animate-in slide-in-from-right-5 duration-300">
+            <div className="bg-red-500 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 max-w-sm">
+              <div className="bg-white/20 p-1 rounded-full shrink-0">
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </div>
+              <p className="text-sm font-medium">{errorMessage}</p>
               <button
-                onClick={() => setShowDisconnectMenu(false)}
-                className="px-4 py-2 rounded-lg text-sm font-medium text-[var(--sui-text-secondary)] hover:bg-[var(--sui-bg-tertiary)] transition-colors"
+                onClick={() => setErrorMessage(null)}
+                className="ml-auto hover:bg-white/20 p-1 rounded-lg transition-colors"
               >
-                Cancel
+                <span className="sr-only">Close</span>
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
               </button>
+            </div>
+          </div>
+        )
+      }
+
+
+      {/* Full Screen Image Modal  */}
+      {
+        showImageModal && (fullScreenImage || galleryImages.length > 0) && (
+          <div
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-sm animate-in fade-in duration-200"
+            onClick={() => {
+              setShowImageModal(false);
+              setGalleryImages([]);
+              setFullScreenImage(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                setShowImageModal(false);
+                setGalleryImages([]);
+                setFullScreenImage(null);
+              }
+              if (e.key === 'ArrowRight' && galleryImages.length > 1) {
+                setGalleryIndex(prev => (prev + 1) % galleryImages.length);
+              }
+              if (e.key === 'ArrowLeft' && galleryImages.length > 1) {
+                setGalleryIndex(prev => (prev - 1 + galleryImages.length) % galleryImages.length);
+              }
+            }}
+            tabIndex={0}
+          >
+            <div className="relative max-w-[90vw] max-h-[90vh] flex items-center justify-center" onClick={e => e.stopPropagation()}>
+              <img
+                src={galleryImages.length > 0 ? galleryImages[galleryIndex] : fullScreenImage!}
+                alt="Full Screen"
+                className="max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl"
+              />
+
+              <div className="absolute top-4 right-4 flex gap-2">
+                {/* Download Button */}
+                <div className="relative">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowDownloadMenu(!showDownloadMenu);
+                    }}
+                    className={`p-2 bg-black/50 hover:bg-black/70 text-white rounded-full backdrop-blur-md transition-all ${showDownloadMenu ? 'bg-black/80 ring-2 ring-white/20' : ''}`}
+                    title="Download Image"
+                  >
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                  </button>
+
+                  {/* Download Options Dropdown */}
+                  {showDownloadMenu && (
+                    <div className="absolute right-0 top-full mt-2 w-32 bg-[var(--sui-bg-secondary)] border border-[var(--sui-border)] rounded-xl shadow-xl overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200 flex flex-col z-50">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const src = galleryImages.length > 0 ? galleryImages[galleryIndex] : fullScreenImage!;
+                          const link = document.createElement('a');
+                          link.href = src;
+                          link.download = `sui-messenger-image-${Date.now()}.webp`;
+                          document.body.appendChild(link);
+                          link.click();
+                          document.body.removeChild(link);
+                          setShowDownloadMenu(false);
+                        }}
+                        className="px-4 py-2 text-sm text-[var(--sui-text)] hover:bg-[var(--sui-bg-tertiary)] text-left transition-colors"
+                      >
+                        WebP
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const src = galleryImages.length > 0 ? galleryImages[galleryIndex] : fullScreenImage!;
+                          const img = new Image();
+                          img.onload = () => {
+                            const canvas = document.createElement('canvas');
+                            canvas.width = img.width;
+                            canvas.height = img.height;
+                            const ctx = canvas.getContext('2d');
+                            if (ctx) {
+                              ctx.drawImage(img, 0, 0);
+                              const pngUrl = canvas.toDataURL('image/png');
+                              const link = document.createElement('a');
+                              link.href = pngUrl;
+                              link.download = `sui-messenger-image-${Date.now()}.png`;
+                              document.body.appendChild(link);
+                              link.click();
+                              document.body.removeChild(link);
+                            }
+                          };
+                          img.src = src;
+                          setShowDownloadMenu(false);
+                        }}
+                        className="px-4 py-2 text-sm text-[var(--sui-text)] hover:bg-[var(--sui-bg-tertiary)] text-left transition-colors"
+                      >
+                        PNG
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const src = galleryImages.length > 0 ? galleryImages[galleryIndex] : fullScreenImage!;
+                          const img = new Image();
+                          img.onload = () => {
+                            const canvas = document.createElement('canvas');
+                            canvas.width = img.width;
+                            canvas.height = img.height;
+                            const ctx = canvas.getContext('2d');
+                            if (ctx) {
+                              // Fill white background for JPEG transparency
+                              ctx.fillStyle = '#FFFFFF';
+                              ctx.fillRect(0, 0, canvas.width, canvas.height);
+                              ctx.drawImage(img, 0, 0);
+                              const jpgUrl = canvas.toDataURL('image/jpeg', 0.9);
+                              const link = document.createElement('a');
+                              link.href = jpgUrl;
+                              link.download = `sui-messenger-image-${Date.now()}.jpg`;
+                              document.body.appendChild(link);
+                              link.click();
+                              document.body.removeChild(link);
+                            }
+                          };
+                          img.src = src;
+                          setShowDownloadMenu(false);
+                        }}
+                        className="px-4 py-2 text-sm text-[var(--sui-text)] hover:bg-[var(--sui-bg-tertiary)] text-left transition-colors"
+                      >
+                        JPEG
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  onClick={() => {
+                    setShowImageModal(false);
+                    setGalleryImages([]);
+                    setFullScreenImage(null);
+                    setShowDownloadMenu(false);
+                  }}
+                  className="p-2 bg-black/50 hover:bg-black/70 text-white rounded-full backdrop-blur-md transition-all"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+              {galleryImages.length > 1 && (
+                <>
+                  <button
+                    className="absolute left-[-50px] top-1/2 -translate-y-1/2 p-2 text-white/50 hover:text-white transition-colors hover:bg-white/10 rounded-full"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setGalleryIndex(prev => (prev - 1 + galleryImages.length) % galleryImages.length);
+                    }}
+                  >
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M15 18l-6-6 6-6" />
+                    </svg>
+                  </button>
+                  <button
+                    className="absolute right-[-50px] top-1/2 -translate-y-1/2 p-2 text-white/50 hover:text-white transition-colors hover:bg-white/10 rounded-full"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setGalleryIndex(prev => (prev + 1) % galleryImages.length);
+                    }}
+                  >
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M9 18l6-6-6-6" />
+                    </svg>
+                  </button>
+
+                  {/* Counter */}
+                  <div className="absolute -bottom-10 left-1/2 -translate-x-1/2 text-white/80 font-medium bg-black/50 px-3 py-1 rounded-full text-sm backdrop-blur-md">
+                    {galleryIndex + 1} / {galleryImages.length}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )
+      }
+
+      {/* Video Preview Modal  */}
+      {
+        showVideoModal && previewVideoSrc && (
+          <div
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-sm animate-in fade-in duration-200"
+            onClick={() => {
+              setShowVideoModal(false);
+              setPreviewVideoSrc(null);
+            }}
+          >
+            <div className="relative w-full max-w-4xl max-h-[90vh] flex items-center justify-center p-4" onClick={e => e.stopPropagation()}>
+              <div className="w-full rounded-2xl overflow-hidden shadow-2xl border border-white/10 bg-black">
+                <CustomVideoPlayer
+                  src={previewVideoSrc}
+                  className="max-h-[85vh]"
+                  autoPlay={true}
+                />
+              </div>
+
               <button
                 onClick={() => {
-                  if (sessionKey) {
-                    refreshSession(); // End session first
-                  }
-                  disconnect(); // Then disconnect wallet
-                  setShowDisconnectMenu(false);
+                  setShowVideoModal(false);
+                  setPreviewVideoSrc(null);
                 }}
-                className="px-4 py-2 rounded-lg text-sm font-medium bg-red-500 text-white hover:bg-red-600 transition-colors shadow-lg shadow-red-500/20"
+                className="absolute top-4 right-4 p-2 bg-black/50 hover:bg-black/70 text-white rounded-full backdrop-blur-md transition-all z-50"
               >
-                Disconnect
+                <X size={24} />
               </button>
             </div>
           </div>
-        </div>
-      )}
+        )
+      }
 
-      {/* Error Toast Notification */}
-      {errorMessage && (
-        <div className="fixed top-6 right-6 z-50 animate-in slide-in-from-right-5 duration-300">
-          <div className="bg-red-500 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 max-w-sm">
-            <div className="bg-white/20 p-1 rounded-full shrink-0">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </div>
-            <p className="text-sm font-medium">{errorMessage}</p>
-            <button
-              onClick={() => setErrorMessage(null)}
-              className="ml-auto hover:bg-white/20 p-1 rounded-lg transition-colors"
-            >
-              <span className="sr-only">Close</span>
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Chat Creation Loading Overlay  */}
-      {isCreatingChat && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center" style={{ backgroundColor: 'rgba(0, 0, 0, 0.7)' }}>
-          <div className="bg-[var(--sui-bg-secondary)] rounded-lg p-6 max-w-sm mx-4 border border-[var(--sui-border)] shadow-xl">
-            <div className="text-center">
-              <div className="w-12 h-12 bg-gradient-to-br from-[var(--sui-blue)] to-[var(--sui-purple)] rounded-full flex items-center justify-center mx-auto mb-4">
-                <RefreshCw className="animate-spin text-white" size={24} />
-              </div>
-              <h3 className="text-lg font-semibold text-[var(--sui-text)] mb-2">Creating Chat</h3>
-              <p className="text-sm text-[var(--sui-text-secondary)]">
-                Setting up secure conversation with<br />
-                <span className="font-mono text-xs">{selectedContact ? formatAddress(selectedContact) : '...'}</span>
-              </p>
-            </div>
-          </div>
-        </div>
-
-      )}
     </div >
   );
 }
