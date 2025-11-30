@@ -102,6 +102,7 @@ export async function downloadFromWalrus(blobId: string): Promise<string> {
     }
 
     let lastError;
+    let allNotFound = true;
 
     // 2. Try each aggregator in the list
     for (const aggregatorUrl of config.aggregators) {
@@ -120,7 +121,7 @@ export async function downloadFromWalrus(blobId: string): Promise<string> {
 
             if (response.ok) {
                 const content = await response.text();
-                console.log(`Download successful from ${aggregatorUrl}`);
+                // console.debug(`Download successful from ${aggregatorUrl}`);
 
                 // Cache it (only if small enough)
                 try {
@@ -128,16 +129,24 @@ export async function downloadFromWalrus(blobId: string): Promise<string> {
                         localStorage.setItem(`walrus_cache_${blobId}`, content);
                     }
                 } catch (e) {
-                    console.warn('Failed to cache downloaded content:', e);
+                    // console.debug('Failed to cache downloaded content:', e);
                 }
                 return content;
             } else {
-                console.warn(`Aggregator ${aggregatorUrl} returned ${response.status}`);
+                console.debug(`Aggregator ${aggregatorUrl} returned ${response.status}`);
+                if (response.status !== 404) {
+                    allNotFound = false;
+                }
             }
         } catch (error) {
-            console.warn(`Failed to fetch from ${aggregatorUrl}:`, error);
+            console.debug(`Failed to fetch from ${aggregatorUrl}:`, error);
             lastError = error;
+            allNotFound = false; // Network error is not a "Not Found"
         }
+    }
+
+    if (allNotFound) {
+        throw new Error("Content not found");
     }
 
     throw lastError || new Error("All aggregators failed");

@@ -1,9 +1,9 @@
-import { useState, useMemo, useEffect, useRef } from 'react';
+import { useState, useMemo, useEffect, useRef, useTransition } from 'react';
 import { useCurrentAccount, useSuiClientQuery, useSignAndExecuteTransaction, ConnectButton, useSuiClient, useSignPersonalMessage, useDisconnectWallet } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
 import { bcs } from '@mysten/bcs';
 import { fromHex, toHex, normalizeSuiAddress } from '@mysten/sui/utils';
-import { Mic, Trash2, StopCircle, Play, Pause, Send, Paperclip, Clock, CheckCheck, RefreshCw, MessageSquare, X, Maximize2, Hourglass, Copy, Power, Settings, Sun, Moon, Search, PlusCircle, MoreVertical } from 'lucide-react';
+import { Mic, Trash2, Play, Send, Paperclip, Clock, CheckCheck, RefreshCw, MessageSquare, X, Maximize2, Hourglass, Copy, Power, Settings, Sun, Moon, Search, PlusCircle, MoreVertical, Loader2, AlertCircle } from 'lucide-react';
 
 import { useTheme } from '../context/ThemeContext';
 import { useSealSession } from '../hooks/useSealSession';
@@ -15,13 +15,25 @@ import { ReadReceipt } from './ReadReceipt';
 import { getCurrentTTLOption } from '../utils/session-preferences';
 import { PACKAGE_ID, CHAT_REGISTRY_ID } from '../constants';
 import { downloadFromWalrus, uploadToWalrus } from '../utils/walrus';
-import { encryptMessage, decryptMessage, calculateContentHash, createSealSession } from '../utils/crypto';
+import { encryptMessage, calculateContentHash, createSealSession } from '../utils/crypto';
 
 const Address = bcs.bytes(32).transform({
   input: (val: string) => fromHex(val),
   output: (val) => toHex(val),
 });
 const ParticipantsKey = bcs.vector(Address);
+
+const MessageSkeleton = ({ isSender }: { isSender: boolean }) => (
+  <div className={`flex ${isSender ? 'justify-end' : 'justify-start'} animate-pulse`}>
+    <div className={`max-w-[70%] md:max-w-md rounded-2xl p-4 ${isSender
+      ? 'bg-[var(--sui-blue)]/20 rounded-br-none'
+      : 'bg-[var(--sui-bg-secondary)] rounded-bl-none'
+      }`}>
+      <div className="h-4 bg-white/10 rounded w-32 mb-2"></div>
+      <div className="h-3 bg-white/10 rounded w-24"></div>
+    </div>
+  </div>
+);
 
 export function Chat() {
   const account = useCurrentAccount();
@@ -30,6 +42,7 @@ export function Chat() {
   const { mutateAsync: signAndExecuteAsync } = useSignAndExecuteTransaction();
   const { mutate: disconnect } = useDisconnectWallet();
   const { theme, toggleTheme } = useTheme();
+  const [, startTransition] = useTransition();
 
   // SEAL Session Management
   const { sessionKey, isReady: isSessionReady, isLoading: isSessionLoading, saveSession, expirationTimeMs, refresh: refreshSession } = useSealSession();
@@ -50,6 +63,25 @@ export function Chat() {
   const [videoGallery, setVideoGallery] = useState<string[]>([]);
   const [videoGalleryIndex, setVideoGalleryIndex] = useState(0);
   const attemptRef = useRef<string | null>(null);
+  const [pendingContacts, setPendingContacts] = useState<Set<string>>(new Set());
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [selectedContact, setSelectedContact] = useState<string | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [newChatAddress, setNewChatAddress] = useState('');
+  const [showNewChatInput, setShowNewChatInput] = useState(false);
+  const [isCreatingChat, setIsCreatingChat] = useState(false);
+  const [messageLimit, setMessageLimit] = useState(20);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const prevScrollHeightRef = useRef<number | null>(null);
+  const isAtBottomRef = useRef(true);
+  const prevContactRef = useRef(selectedContact);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const [optimisticMessages, setOptimisticMessages] = useState<any[]>([]);
+  const [chatIds, setChatIds] = useState<Record<string, string>>({});
+  const [readMessageIds, setReadMessageIds] = useState<Set<string>>(new Set());
 
   // Check for TTL preference on mount
   useEffect(() => {
@@ -171,44 +203,27 @@ export function Chat() {
     return () => clearInterval(interval);
   }, [expirationTimeMs, isSessionReady]);
 
-  const [selectedContact, setSelectedContact] = useState<string | null>(null);
+  // State consolidated at the top
   const [messageText, setMessageText] = useState('');
-  const [searchTerm, setSearchTerm] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [sendingStatus, setSendingStatus] = useState<string | null>(null);
-  const [showNewChatInput, setShowNewChatInput] = useState(false);
-  const [newChatAddress, setNewChatAddress] = useState('');
   const [decryptedMessages, setDecryptedMessages] = useState<Record<string, string>>({});
-  const [optimisticMessages, setOptimisticMessages] = useState<any[]>([]);
-  const [isAtBottom, setIsAtBottom] = useState(true);
   const [epochs, setEpochs] = useState(1);
-  const [isCreatingChat, setIsCreatingChat] = useState(false);
-  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [filePreviews, setFilePreviews] = useState<{ type: 'image' | 'video', url: string }[]>([]);
   const [showImageModal, setShowImageModal] = useState(false);
   const [fullScreenImage, setFullScreenImage] = useState<string | null>(null);
   const [galleryImages, setGalleryImages] = useState<string[]>([]);
   const [galleryIndex, setGalleryIndex] = useState(0);
-  const [isDragging, setIsDragging] = useState(false);
   const dragCounter = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const [messageLimit, setMessageLimit] = useState(20);
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
-  const prevScrollHeightRef = useRef<number | null>(null);
-
-  // Map of Contact Address -> Chat ID
-  const [chatIds, setChatIds] = useState<Record<string, string>>({});
-  // Map of Contact Address -> Unread Count
-  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
-  const [readMessageIds, setReadMessageIds] = useState<Set<string>>(new Set());
-
-  // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const [retryTrigger, setRetryTrigger] = useState(0);
+  const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const cancelSendingRef = useRef(false);
-  const [sendingImagesCount, setSendingImagesCount] = useState(0);
+
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
 
 
@@ -218,6 +233,47 @@ export function Chat() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Web Worker for Decryption
+  const workerRef = useRef<Worker | null>(null);
+
+  useEffect(() => {
+    workerRef.current = new Worker(new URL('../workers/decryption.worker.ts', import.meta.url), { type: 'module' });
+
+    workerRef.current.onmessage = (e) => {
+      const { msgId, content, error } = e.data;
+      if (error) {
+        // console.debug(`[Worker] Decryption failed for ${msgId} (retrying):`, error);
+        // Set to retrying state
+        setDecryptedMessages(prev => ({
+          ...prev,
+          [msgId]: "LOADING_STATE"
+        }));
+        // Trigger retry after delay
+        // Debounce retry trigger
+        if (!retryTimeoutRef.current) {
+          retryTimeoutRef.current = setTimeout(() => {
+            setRetryTrigger(prev => prev + 1);
+            retryTimeoutRef.current = null;
+          }, 1000);
+        }
+      } else {
+        setDecryptedMessages(prev => ({
+          ...prev,
+          [msgId]: content
+        }));
+      }
+    };
+
+    return () => {
+      workerRef.current?.terminate();
+    };
+  }, []);
+
+  // Memoize exported session key for worker
+  const exportedSessionKey = useMemo(() => {
+    return sessionKey ? sessionKey.export() : null;
+  }, [sessionKey]);
 
   // Auto-resize textarea
   const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
@@ -231,6 +287,7 @@ export function Chat() {
       messagesEndRef.current.scrollIntoView({ behavior, block: 'end' });
     }
     setIsAtBottom(true);
+    isAtBottomRef.current = true;
   };
 
   const processImage = async (file: File): Promise<string> => {
@@ -303,42 +360,7 @@ export function Chat() {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  const handleScroll = () => {
-    const container = messagesContainerRef.current;
-    if (!container) return;
-    const { scrollTop, scrollHeight, clientHeight } = container;
-    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
-    setIsAtBottom(distanceFromBottom < 100);
 
-    // Pagination Logic: Load more when near top
-    if (scrollTop < 50 && !isLoadingMore) {
-      // Check if we have more messages to load
-      const conversation = conversations.find((c: any) => c.address === selectedContact);
-      const totalMessages = conversation ? conversation.messages.length + optimisticMessages.length : 0;
-
-      if (messageLimit < totalMessages) {
-        console.log(`[Pagination] Loading more messages... Current: ${messageLimit}, Total: ${totalMessages}`);
-        setIsLoadingMore(true);
-        prevScrollHeightRef.current = scrollHeight;
-        setMessageLimit(prev => prev + 20);
-      }
-    }
-  };
-
-  // Restore scroll position after loading more messages
-  useEffect(() => {
-    if (isLoadingMore && prevScrollHeightRef.current !== null && messagesContainerRef.current) {
-      const container = messagesContainerRef.current;
-      const newScrollHeight = container.scrollHeight;
-      const heightDifference = newScrollHeight - prevScrollHeightRef.current;
-
-      // Adjust scroll position to maintain visual stability
-      container.scrollTop = heightDifference;
-
-      prevScrollHeightRef.current = null;
-      setIsLoadingMore(false);
-    }
-  }, [messageLimit]); // Run when messageLimit changes (and thus content renders)
 
   // Reset pagination on contact change
   useEffect(() => {
@@ -604,12 +626,30 @@ export function Chat() {
       });
     }
 
+    // 3. Add Pending Contacts
+    pendingContacts.forEach(contact => {
+      const contactLower = contact.toLowerCase();
+      if (!groups[contactLower]) {
+        groups[contactLower] = {
+          address: contactLower,
+          lastMessage: null,
+          messages: [],
+          createdAt: Date.now(),
+          isPending: true // Flag for UI
+        };
+      }
+    });
+
     return Object.values(groups).sort((a: any, b: any) => {
+      // Pending chats go to top
+      if (a.isPending && !b.isPending) return -1;
+      if (!a.isPending && b.isPending) return 1;
+
       const timeA = a.lastMessage ? Number(a.lastMessage.timestamp) : (a.createdAt / 1000);
       const timeB = b.lastMessage ? Number(b.lastMessage.timestamp) : (b.createdAt / 1000);
       return timeB - timeA;
     });
-  }, [events, chatEvents, account]);
+  }, [events, chatEvents, account, pendingContacts]);
 
   // Contact List
   const contactList = useMemo(() => {
@@ -633,17 +673,93 @@ export function Chat() {
     const allMessages = [...optimistic, ...realMessages];
     // Sort by timestamp descending (newest first)
     const sortedMessages = allMessages.sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
-
     // Pagination: Slice the messages
     return sortedMessages.slice(0, messageLimit);
   }, [selectedContact, conversations, optimisticMessages, account, messageLimit]);
 
-  // Auto-scroll to bottom when chat opens or messages change
+  // Auto-scroll to bottom when chat opens or NEW messages arrive (not old ones loaded)
+  // Fix: Track the NEWEST message (index 0), not the oldest.
+  const newestMessage = activeMessages.length > 0 ? activeMessages[0] : null;
+  const newestMessageId = newestMessage ? (newestMessage.message_id || newestMessage.id) : null;
+
+  // Find the newest VALID message (not an error) to scroll to
+  const bestTargetId = useMemo(() => {
+    if (!activeMessages.length) return null;
+
+    for (const msg of activeMessages) {
+      const rawMsgId = msg.message_id || msg.id;
+      const msgId = (typeof rawMsgId === 'string' ? rawMsgId : rawMsgId?.id) || msg.walrus_blob_id;
+      const content = decryptedMessages[msgId];
+      // Treat LOADING as valid for scroll purposes (so we see the spinner)
+      // But treat UNAVAILABLE/FAILED as invalid (so we skip them)
+      const isError = content === "UNAVAILABLE" || content === "⚠️ Failed to load content";
+
+      if (!isError) {
+        return msgId;
+      }
+    }
+    return null;
+  }, [activeMessages, decryptedMessages]);
+
   useEffect(() => {
-    if (selectedContact && !isLoadingMore) {
+    if (!selectedContact || isLoadingMore) return;
+
+    const isChatSwitch = prevContactRef.current !== selectedContact;
+    const shouldScroll = isChatSwitch || isAtBottomRef.current;
+
+    if (shouldScroll && bestTargetId) {
+      // Small timeout to ensure DOM is ready
+      setTimeout(() => {
+        const el = document.getElementById(`msg-${bestTargetId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: isChatSwitch ? 'auto' : 'smooth', block: 'end' });
+        } else {
+          scrollToBottom();
+        }
+      }, 50);
+    } else if (shouldScroll && !bestTargetId) {
+      // Fallback if no valid messages found at all
       scrollToBottom();
     }
-  }, [selectedContact, activeMessages]); // Warning: activeMessages changes on pagination, but isLoadingMore check prevents jump
+
+    prevContactRef.current = selectedContact;
+  }, [selectedContact, bestTargetId, isLoadingMore]);
+
+
+
+  const handleScroll = () => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const { scrollTop, scrollHeight, clientHeight } = container;
+    const isBottom = Math.abs(scrollHeight - clientHeight - scrollTop) < 50;
+    setIsAtBottom(isBottom);
+    isAtBottomRef.current = isBottom;
+
+    // Load more messages when scrolling to top
+    if (scrollTop < 50 && !isLoadingMore && activeMessages.length >= messageLimit) {
+      console.log('Loading more messages...');
+      setIsLoadingMore(true);
+      prevScrollHeightRef.current = scrollHeight;
+      setMessageLimit(prev => prev + 20);
+    }
+  };
+
+  // Restore scroll position after loading more messages
+  useEffect(() => {
+    if (!isLoadingMore || !prevScrollHeightRef.current || !messagesContainerRef.current) return;
+
+    const container = messagesContainerRef.current;
+    const newScrollHeight = container.scrollHeight;
+    const diff = newScrollHeight - prevScrollHeightRef.current;
+
+    if (diff > 0) {
+      container.scrollTop = diff;
+    }
+
+    setIsLoadingMore(false);
+    prevScrollHeightRef.current = null;
+  }, [activeMessages.length, messageLimit]);
 
   // Decrypt Messages
   // Keep ref in sync to avoid infinite loop in decryption effect
@@ -658,119 +774,148 @@ export function Chat() {
       if (!activeMessages.length || !account) return;
 
       // Wait for session key if not ready yet
-      if (!sessionKey && isSessionReady === false) {
-        console.log('[SEAL] Waiting for session key... (sessionKey is null, isReady is false)');
-        return;
-      }
-
       if (!sessionKey) {
-        console.log('[SEAL] Session key is null but isReady is', isSessionReady);
+        if (isSessionReady === false) {
+          console.log('[SEAL] Waiting for session key... (sessionKey is null, isReady is false)');
+        } else {
+          console.log('[SEAL] Session key is null but isReady is', isSessionReady);
+        }
         return;
       }
 
       console.log('[SEAL] Have session key, proceeding to decrypt...');
 
-      activeMessages.forEach(async (msg: any) => {
-        // Fix: Match the ID logic used in the render loop
-        const rawMsgId = msg.message_id || msg.id;
-        const msgId = (typeof rawMsgId === 'string' ? rawMsgId : rawMsgId?.id) || msg.walrus_blob_id;
+      // Sort messages by timestamp descending (newest first) to prioritize them
+      const sortedMessages = [...activeMessages].sort((a: any, b: any) => Number(b.timestamp) - Number(a.timestamp));
 
-        // Use ref to check if already decrypted without adding to dependency array
-        if (!msgId || decryptedMessagesRef.current[msgId]) return;
+      // Process in batches of 5
+      const BATCH_SIZE = 5;
 
-        if (msg.walrus_blob_id) {
-          try {
-            // Download encrypted content from Walrus
-            const encryptedContent = await downloadFromWalrus(msg.walrus_blob_id);
+      for (let i = 0; i < sortedMessages.length; i += BATCH_SIZE) {
+        const batch = sortedMessages.slice(i, i + BATCH_SIZE);
 
-            // Decrypt with SEAL if we have a session key
-            if (sessionKey && chatIds[selectedContact?.toLowerCase() || '']) {
-              try {
-                const chatId = chatIds[selectedContact!.toLowerCase()];
-                const isSender = msg.sender?.toLowerCase() === account.address.toLowerCase();
+        // Process batch in parallel
+        await Promise.all(batch.map(async (msg: any) => {
+          // Fix: Match the ID logic used in the render loop
+          const rawMsgId = msg.message_id || msg.id;
+          const msgId = (typeof rawMsgId === 'string' ? rawMsgId : rawMsgId?.id) || msg.walrus_blob_id;
 
-                console.log(`[SEAL] Decrypting message ${msgId} (${isSender ? 'sender' : 'receiver'})`);
+          // Use ref to check if already decrypted without adding to dependency array
+          const currentContent = decryptedMessagesRef.current[msgId];
+          const isError = typeof currentContent === 'string' && currentContent.startsWith("⚠️");
+          const isRetryPrompt = typeof currentContent === 'object'; // The JSX element for "Creating secure session..."
 
-                // Use content_hash from the event for SEAL access control
-                if (!msg.content_hash) {
-                  console.error('[SEAL] Message is missing content_hash, cannot decrypt');
-                  return;
-                }
 
-                // Convert content_hash from event (array of numbers) to Uint8Array
-                const contentHashArray = Array.isArray(msg.content_hash)
-                  ? new Uint8Array(msg.content_hash)
-                  : msg.content_hash;
+          // Skip if already decrypted successfully (not an error, not a retry prompt)
+          // OR if currently loading (prevent parallel requests)
+          if (!msgId || (currentContent && !isError && !isRetryPrompt && currentContent !== "RETRYING") || currentContent === "LOADING") return;
 
-                console.log('[SEAL] content_hash type:', typeof msg.content_hash, 'isArray:', Array.isArray(msg.content_hash));
-
-                const decryptedText = await decryptMessage(
-                  encryptedContent,
-                  contentHashArray, // Convert to Uint8Array
-                  chatId,
-                  sessionKey,
-                  isSender
-                );
-
-                setDecryptedMessages(prev => ({
-                  ...prev,
-                  [msgId]: decryptedText
-                }));
-              } catch (decryptError) {
-                console.error(`[SEAL] Decryption failed for ${msgId}:`, decryptError);
-                // Fallback: Show error instead of raw encrypted content (which looks like symbols)
-                setDecryptedMessages(prev => ({
-                  ...prev,
-                  [msgId]: "⚠️ Decryption Failed"
-                }));
-              }
-            } else {
-              // No session key yet or no chat ID - store encrypted for now
-              const chatId = chatIds[selectedContact?.toLowerCase() || ''];
-              console.warn(`[SEAL] Cannot decrypt ${msgId}: missing session key (${!!sessionKey}) or chat ID (${!!chatId}) for contact ${selectedContact}`);
-              if (!chatId) {
-                console.log('Current chatIds state:', JSON.stringify(chatIds));
-              }
+          if (msg.walrus_blob_id) {
+            try {
+              // Mark as loading immediately to prevent double-fetching
               setDecryptedMessages(prev => ({
                 ...prev,
-                [msgId]: (
-                  <span
-                    className="cursor-pointer hover:underline text-blue-400"
-                    onClick={async (e) => {
-                      e.stopPropagation();
-                      console.log("Retrying chat ID lookup...");
-                      const id = await fetchChatId(selectedContact!);
-                      if (id) {
-                        setChatIds(prev => ({ ...prev, [selectedContact!.toLowerCase()]: id }));
-                        // Clear this message so it re-renders
-                        setDecryptedMessages(prev => {
-                          const newState = { ...prev };
-                          delete newState[msgId];
-                          return newState;
-                        });
-                      } else {
-                        alert("Still could not find Chat ID. Please try creating the chat again.");
-                        createChatForContact(selectedContact!);
-                      }
-                    }}
-                  >
-                    🔒 Creating secure session... (Click to retry)
-                  </span>
-                )
+                [msgId]: "LOADING"
               }));
+
+              // Download encrypted content from Walrus
+              const encryptedContent = await downloadFromWalrus(msg.walrus_blob_id);
+
+              // Decrypt with SEAL if we have a session key
+              if (sessionKey && chatIds[selectedContact?.toLowerCase() || '']) {
+                try {
+                  const chatId = chatIds[selectedContact!.toLowerCase()];
+                  const isSender = msg.sender?.toLowerCase() === account.address.toLowerCase();
+
+                  console.log(`[SEAL] Decrypting message ${msgId} (${isSender ? 'sender' : 'receiver'})`);
+
+                  // Use content_hash from the event for SEAL access control
+                  if (!msg.content_hash) {
+                    console.error('[SEAL] Message is missing content_hash, cannot decrypt');
+                    return;
+                  }
+
+                  // Convert content_hash from event (array of numbers) to Uint8Array
+                  const contentHashArray = Array.isArray(msg.content_hash)
+                    ? new Uint8Array(msg.content_hash)
+                    : msg.content_hash;
+
+                  console.log('[SEAL] Offloading decryption to worker for:', msgId);
+
+                  // Post to Worker
+                  workerRef.current?.postMessage({
+                    msgId,
+                    encryptedContent,
+                    contentHash: contentHashArray,
+                    chatId,
+                    exportedSession: exportedSessionKey,
+                    isSender
+                  });
+
+                } catch (decryptError) {
+                  // console.debug(`[SEAL] Setup failed for ${msgId} (retrying):`, decryptError);
+                  setDecryptedMessages(prev => ({
+                    ...prev,
+                    [msgId]: "RETRYING"
+                  }));
+
+                  // Debounce retry trigger
+                  if (!retryTimeoutRef.current) {
+                    retryTimeoutRef.current = setTimeout(() => {
+                      setRetryTrigger(prev => prev + 1);
+                      retryTimeoutRef.current = null;
+                    }, 2000); // Increased retry delay to 2s
+                  }
+                }
+              } else {
+                // No session key yet or no chat ID - store encrypted for now
+                // const chatId = chatIds[selectedContact?.toLowerCase() || ''];
+                // console.debug(`[SEAL] Cannot decrypt ${msgId}: missing session key`);
+
+                setDecryptedMessages(prev => ({
+                  ...prev,
+                  [msgId]: (
+                    <span
+                      className="cursor-pointer hover:underline text-blue-400"
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        console.log("Retrying chat ID lookup...");
+                        const id = await fetchChatId(selectedContact!);
+                        if (id) {
+                          setChatIds(prev => ({ ...prev, [selectedContact!.toLowerCase()]: id }));
+                          setDecryptedMessages(prev => {
+                            const newState = { ...prev };
+                            delete newState[msgId];
+                            return newState;
+                          });
+                        } else {
+                          createChatForContact(selectedContact!);
+                        }
+                      }}
+                    >
+                      🔒 Creating secure session... (Click to retry)
+                    </span>
+                  )
+                }));
+              }
+            } catch (e: any) {
+              // console.debug(`Failed to load message ${msgId} (retrying):`, e);
+              const isPermanentError = e.message === "Content not found";
+
+              setDecryptedMessages(prev => ({
+                ...prev,
+                [msgId]: isPermanentError ? "UNAVAILABLE" : "⚠️ Failed to load content"
+              }));
+
+              // Removed auto-retry logic to prevent infinite loops on network errors.
+              // User can manually click to retry if it's not a permanent error.
             }
-          } catch (e) {
-            console.error(`Failed to load message ${msgId}:`, e);
-            setDecryptedMessages(prev => ({
-              ...prev,
-              [msgId]: "⚠️ Failed to load content"
-            }));
           }
-        }
-      });
+        }));
+      }
     };
     fetchMessages();
-  }, [activeMessages, sessionKey, isSessionReady, account, chatIds, selectedContact]);
+  }, [activeMessages, sessionKey, isSessionReady, account, chatIds, selectedContact, retryTrigger]);
 
   // Remove Optimistic Messages
   useEffect(() => {
@@ -880,10 +1025,13 @@ export function Chat() {
   const createChatForContact = async (contact: string) => {
     if (!account) return;
 
-    setIsCreatingChat(true);
-    try {
-      console.log('[Chat] Auto-creating chat with:', contact);
+    // Optimistic UI: Add to pending immediately
+    setPendingContacts(prev => new Set(prev).add(contact.toLowerCase()));
+    setNewChatAddress('');
+    setShowNewChatInput(false);
 
+    try {
+      setIsCreatingChat(true);
       const tx = new Transaction();
       tx.moveCall({
         target: `${PACKAGE_ID}::messenger::create_chat`,
@@ -912,6 +1060,8 @@ export function Chat() {
         const newChatId = parsed.id;
         console.log('[Chat] Chat created successfully. ID:', newChatId);
         setChatIds(prev => ({ ...prev, [contact.toLowerCase()]: newChatId }));
+        // Select the new chat immediately
+        setSelectedContact(contact.toLowerCase());
       }
     } catch (error) {
       console.error('[Chat] Failed to create chat:', error);
@@ -919,6 +1069,12 @@ export function Chat() {
       setSelectedContact(null);
     } finally {
       setIsCreatingChat(false);
+      // Remove from pending
+      setPendingContacts(prev => {
+        const next = new Set(prev);
+        next.delete(contact.toLowerCase());
+        return next;
+      });
     }
   };
 
@@ -1143,6 +1299,8 @@ export function Chat() {
       if (cancelSendingRef.current) {
         setIsSending(false);
         setSendingStatus(null);
+        setSelectedFiles([]);
+        setFilePreviews([]);
         cancelSendingRef.current = false;
         return true;
       }
@@ -1322,7 +1480,7 @@ export function Chat() {
 
         // Encrypt
         console.log(`SendMessage: Encrypting file ${i + 1}...`);
-        setSendingStatus(`Encrypting ${isVideo ? 'video' : 'image'}...`);
+        setSendingStatus(`Encrypting ${isVideo ? 'video' : isAudio ? 'audio' : 'image'} ${i + 1}/${imagesToProcess.length}...`);
         const plaintextHash = calculateContentHash(content);
         const { encryptedContent } = await encryptMessage(content, chatId, plaintextHash);
 
@@ -1330,7 +1488,7 @@ export function Chat() {
 
         // Upload
         console.log(`SendMessage: Uploading file ${i + 1} to Walrus...`);
-        setSendingStatus(`Uploading to Walrus...`);
+        setSendingStatus(`Uploading ${isVideo ? 'video' : isAudio ? 'audio' : 'image'} ${i + 1}/${imagesToProcess.length} to Walrus...`);
         const { blobId } = await uploadToWalrus(encryptedContent, epochs);
         console.log(`SendMessage: Uploaded file ${i + 1}, Blob ID: ${blobId}`);
 
@@ -1470,7 +1628,7 @@ export function Chat() {
       setSendingStatus('');
     } finally {
       setIsSending(false);
-      setSendingImagesCount(0);
+
     }
   };
 
@@ -1769,35 +1927,58 @@ export function Chat() {
 
         {/* Contact List */}
         <div className="flex-1 overflow-y-auto custom-scrollbar">
-          {contactList.map((contact: any) => (
-            <div
-              key={contact.address}
-              onClick={() => setSelectedContact(contact.address)}
-              className={`flex items-center gap-3 p-3 cursor-pointer hover:bg-[var(--sui-bg-tertiary)] transition-all duration-200 border-b border-transparent ${selectedContact === contact.address ? 'bg-[var(--sui-bg-tertiary)] border-l-2 border-l-[var(--sui-blue)]' : ''
-                }`}
-            >
-              <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[var(--sui-blue)] to-[var(--sui-purple)] flex items-center justify-center text-white">
-                <MessageSquare size={24} />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex justify-between items-baseline">
-                  <h3 className="text-[var(--sui-text)] font-semibold truncate">
+          {contactList.map((contact: any) => {
+            const isSelected = selectedContact === contact.address;
+            const isPending = contact.isPending;
+
+            return (
+              <div
+                key={contact.address}
+                onClick={() => {
+                  if (!isPending) {
+                    startTransition(() => {
+                      setSelectedContact(contact.address);
+                    });
+                  }
+                }}
+                className={`p-3 rounded-xl cursor-pointer transition-all ${isSelected
+                  ? 'bg-[var(--sui-blue)] text-white shadow-md'
+                  : isPending
+                    ? 'bg-[var(--sui-bg-tertiary)] opacity-70 cursor-wait'
+                    : 'hover:bg-[var(--sui-bg-secondary)] text-[var(--sui-text)]'
+                  }`}
+              >
+                <div className="flex justify-between items-start mb-1">
+                  <span className={`font-medium text-sm ${isSelected ? 'text-white' : 'text-[var(--sui-text)]'}`}>
                     {formatAddress(contact.address)}
-                  </h3>
-                  <div className="flex flex-col items-end gap-1">
-                    <span className="text-xs text-[var(--sui-text-secondary)]">
-                      {contact.lastMessage ? formatTime(contact.lastMessage.timestamp) : (contact.createdAt ? formatTime((contact.createdAt / 1000).toString()) : '')}
+                  </span>
+                  {isPending ? (
+                    <Loader2 size={12} className="animate-spin text-[var(--sui-blue)]" />
+                  ) : (
+                    <span className={`text-xs ${isSelected ? 'text-blue-100' : 'text-[var(--sui-text-secondary)]'}`}>
+                      {contact.lastMessage ? formatTime(contact.lastMessage.timestamp) : ''}
                     </span>
-                    {unreadCounts[contact.address] > 0 && (
-                      <span className="bg-[var(--sui-blue)] text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[20px] text-center">
-                        {unreadCounts[contact.address]}
-                      </span>
+                  )}
+                </div>
+                <div className="flex justify-between items-center">
+                  <p className={`text-xs truncate max-w-[140px] ${isSelected ? 'text-blue-50' : 'text-[var(--sui-text-secondary)]'}`}>
+                    {isPending ? (
+                      <span className="italic">Creating chat...</span>
+                    ) : contact.lastMessage ? (
+                      contact.lastMessage.content?.text || 'Media message'
+                    ) : (
+                      'No messages yet'
                     )}
-                  </div>
+                  </p>
+                  {!isPending && unreadCounts[contact.address] > 0 && (
+                    <span className="bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[18px] text-center">
+                      {unreadCounts[contact.address]}
+                    </span>
+                  )}
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
@@ -1958,7 +2139,7 @@ export function Chat() {
                                 const showOverlay = isLastItem && remainingCount > 0;
 
                                 return (
-                                  <div key={idx} className={itemClass} onClick={() => {
+                                  <div key={idx} id={`msg-${mId}`} className={itemClass} onClick={() => {
                                     if (isVideo) {
                                       // Filter only videos for the gallery
                                       const videoSources = gridItems.map(it => {
@@ -2040,7 +2221,13 @@ export function Chat() {
 
                       const uniqueKey = `${msgId}-${index}`;
                       const content = decryptedMessages[msgId];
-                      const isError = content === "⚠️ Failed to load content";
+                      const isRetrying = content === "LOADING" || content === "RETRYING" || content === "LOADING_STATE" || content === "⚠️ Retrying...";
+                      const isError = content === "⚠️ Decryption Failed" || content === "⚠️ Failed to load content" || content === "UNAVAILABLE";
+
+                      // Show Skeleton if content is loading OR retrying
+                      if ((!content || isRetrying) && !isError && !msg.isOptimistic) {
+                        return <MessageSkeleton key={uniqueKey} isSender={msg.isSender} />;
+                      }
 
                       // Parse Content for Image/Video/Audio + Caption
                       let imageSrc: string | null = null;
@@ -2048,7 +2235,7 @@ export function Chat() {
                       let audioSrc: string | null = null;
                       let captionText: string | null = null;
 
-                      if (content && !isError) {
+                      if (content && !isError && !isRetrying) {
                         if (content.startsWith('IMG:')) {
                           const parts = content.split('|||');
                           imageSrc = parts[0].substring(4); // Remove IMG:
@@ -2075,6 +2262,7 @@ export function Chat() {
                       return (
                         <div
                           key={uniqueKey}
+                          id={`msg-${msgId}`}
                           className={`flex ${msg.isSender ? 'justify-end' : 'justify-start'} ${msg.isSender ? 'animate-fadeIn-sent' : 'animate-fadeIn-received'
                             }`}
                         >
@@ -2097,7 +2285,7 @@ export function Chat() {
                             {/* Audio Part */}
                             {audioSrc && (
                               <div className="p-2 min-w-[250px]">
-                                <CustomAudioPlayer src={audioSrc} />
+                                <CustomAudioPlayer src={audioSrc} isSender={msg.isSender} />
                               </div>
                             )}
 
@@ -2124,6 +2312,7 @@ export function Chat() {
                             )}
 
                             {/* Text Part */}
+                            {/* Text Part */}
                             {(captionText || (!imageSrc && !content)) && (
                               <div className={`p-3 px-4 ${imageSrc ? 'pt-2' : ''}`}>
                                 <p className="text-sm break-all whitespace-pre-wrap">
@@ -2134,11 +2323,17 @@ export function Chat() {
                                           className="text-red-300 text-xs flex items-center gap-1 cursor-pointer hover:underline"
                                           onClick={(e) => {
                                             e.stopPropagation();
-                                            retryDownload(msgId, msg.walrus_blob_id);
+                                            if (content !== "UNAVAILABLE") {
+                                              retryDownload(msgId, msg.walrus_blob_id);
+                                            }
                                           }}
-                                          title="Click to retry download"
+                                          title={content === "UNAVAILABLE" ? "Content permanently unavailable" : "Click to retry download"}
                                         >
-                                          <RefreshCw size={12} /> Failed to load (Click to retry)
+                                          {content === "UNAVAILABLE" ? (
+                                            <><AlertCircle size={12} /> Content unavailable</>
+                                          ) : (
+                                            <><RefreshCw size={12} /> Failed to load (Click to retry)</>
+                                          )}
                                         </span>
                                       ) : (
                                         !isSessionReady && !sessionKey ? (
@@ -2148,13 +2343,32 @@ export function Chat() {
                                           </span>
                                         ) : (
                                           <span className="italic text-gray-300 text-xs flex items-center gap-1">
-                                            <RefreshCw className="animate-spin" size={10} /> Loading content...
+                                            <Loader2 className="animate-spin" size={12} /> Decrypting...
                                           </span>
                                         )
                                       )
                                     ) : 'Message content unavailable'
                                   )}
                                 </p>
+                              </div>
+                            )}
+
+                            {/* Error State */}
+                            {isError && content !== "UNAVAILABLE" && (
+                              <div className="p-3 text-xs text-red-400 bg-red-500/10 flex items-center gap-2">
+                                <span className="text-lg">⚠️</span>
+                                <div>
+                                  <div className="font-bold">Decryption Failed</div>
+                                  <div className="opacity-75 cursor-pointer hover:underline" onClick={(e) => {
+                                    e.stopPropagation();
+                                    setDecryptedMessages(prev => {
+                                      const next = { ...prev };
+                                      delete next[msgId];
+                                      return next;
+                                    });
+                                    setRetryTrigger(prev => prev + 1);
+                                  }}>Click to retry</div>
+                                </div>
                               </div>
                             )}
 
@@ -2181,17 +2395,19 @@ export function Chat() {
                 <div ref={messagesEndRef} />
               </div >
 
-              {!isAtBottom && (
-                <button
-                  onClick={() => scrollToBottom()}
-                  className="absolute bottom-6 right-6 sui-gradient text-white p-3 rounded-full shadow-2xl hover:scale-110 transition-transform z-10 glow-effect"
-                  title="Go to recent messages"
-                >
-                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
-                  </svg>
-                </button>
-              )}
+              {
+                !isAtBottom && (
+                  <button
+                    onClick={() => scrollToBottom()}
+                    className="absolute bottom-6 right-6 sui-gradient text-white p-3 rounded-full shadow-2xl hover:scale-110 transition-transform z-10 glow-effect"
+                    title="Go to recent messages"
+                  >
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                    </svg>
+                  </button>
+                )
+              }
             </div >
 
             {/* Input Area */}
@@ -2228,10 +2444,13 @@ export function Chat() {
                           )}
                           <button
                             onClick={() => {
-                              setSelectedFiles(prev => prev.filter((_, i) => i !== index));
-                              setFilePreviews(prev => prev.filter((_, i) => i !== index));
+                              if (!isSending) {
+                                setSelectedFiles(prev => prev.filter((_, i) => i !== index));
+                                setFilePreviews(prev => prev.filter((_, i) => i !== index));
+                              }
                             }}
-                            className="absolute -top-2 -right-2 bg-[var(--sui-bg-tertiary)] text-[var(--sui-text-secondary)] border border-[var(--sui-border)] rounded-full p-1 hover:bg-red-500 hover:text-white hover:border-red-500 shadow-sm transition-all opacity-0 group-hover:opacity-100"
+                            disabled={isSending}
+                            className={`absolute -top-2 -right-2 bg-[var(--sui-bg-tertiary)] text-[var(--sui-text-secondary)] border border-[var(--sui-border)] rounded-full p-1 shadow-sm transition-all ${isSending ? 'opacity-0 cursor-not-allowed' : 'hover:bg-red-500 hover:text-white hover:border-red-500 opacity-0 group-hover:opacity-100'}`}
                             title="Remove file"
                           >
                             <X size={12} />
@@ -2356,7 +2575,7 @@ export function Chat() {
                             <span className="text-[10px] font-medium text-[var(--sui-blue)] animate-pulse tracking-wide">
                               {sendingStatus}
                             </span>
-                            {isSending && sendingImagesCount > 0 && (
+                            {isSending && (
                               <button
                                 onClick={() => {
                                   cancelSendingRef.current = true;
