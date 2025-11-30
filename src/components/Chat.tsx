@@ -677,11 +677,6 @@ export function Chat() {
     return sortedMessages.slice(0, messageLimit);
   }, [selectedContact, conversations, optimisticMessages, account, messageLimit]);
 
-  // Auto-scroll to bottom when chat opens or NEW messages arrive (not old ones loaded)
-  // Fix: Track the NEWEST message (index 0), not the oldest.
-  const newestMessage = activeMessages.length > 0 ? activeMessages[0] : null;
-  const newestMessageId = newestMessage ? (newestMessage.message_id || newestMessage.id) : null;
-
   // Find the newest VALID message (not an error) to scroll to
   const bestTargetId = useMemo(() => {
     if (!activeMessages.length) return null;
