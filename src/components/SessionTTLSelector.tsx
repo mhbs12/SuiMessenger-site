@@ -52,7 +52,7 @@ export function SessionTTLSelector({ isOpen, onConfirm }: SessionTTLSelectorProp
                 {/* TTL Options Grid */}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
                     {TTL_OPTIONS.map((option) => {
-                        const isRecommended = option.minutes === 60; // 1 hour
+                        const isRecommended = option.minutes === 30; // 30 minutes (max allowed)
                         const isSelected = selectedTTL === option.minutes;
 
                         return (

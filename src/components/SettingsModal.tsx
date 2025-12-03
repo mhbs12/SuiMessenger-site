@@ -10,7 +10,7 @@ interface SettingsModalProps {
 
 export function SettingsModal({ isOpen, onClose, onEndSession }: SettingsModalProps) {
     const currentOption = getCurrentTTLOption();
-    const [selectedTTL, setSelectedTTL] = useState<number>(currentOption?.minutes || 60);
+    const [selectedTTL, setSelectedTTL] = useState<number>(currentOption?.minutes || 30);
     const [showEndSessionConfirm, setShowEndSessionConfirm] = useState(false);
 
     if (!isOpen) return null;

@@ -18,6 +18,8 @@ export interface TTLOption {
  * Available TTL options for session timeout
  */
 export const TTL_OPTIONS: TTLOption[] = [
+    // NOTE: @mysten/seal currently limits sessions to 30 minutes max.
+    // Options > 30m will cause "Invalid TTL" errors.
     {
         label: '1 minute',
         minutes: 1,
@@ -36,36 +38,36 @@ export const TTL_OPTIONS: TTLOption[] = [
         value: '30m',
         description: 'Short sessions'
     },
-    {
-        label: '1 hour',
-        minutes: 60,
-        value: '1h',
-        description: 'Recommended'
-    },
-    {
-        label: '3 hours',
-        minutes: 180,
-        value: '3h',
-        description: 'Extended sessions'
-    },
-    {
-        label: '6 hours',
-        minutes: 360,
-        value: '6h',
-        description: 'Long sessions'
-    },
-    {
-        label: '12 hours',
-        minutes: 720,
-        value: '12h',
-        description: 'Half day'
-    },
-    {
-        label: '24 hours',
-        minutes: 1440,
-        value: '24h',
-        description: 'Full day'
-    }
+    // {
+    //     label: '1 hour',
+    //     minutes: 60,
+    //     value: '1h',
+    //     description: 'Recommended'
+    // },
+    // {
+    //     label: '3 hours',
+    //     minutes: 180,
+    //     value: '3h',
+    //     description: 'Extended sessions'
+    // },
+    // {
+    //     label: '6 hours',
+    //     minutes: 360,
+    //     value: '6h',
+    //     description: 'Long sessions'
+    // },
+    // {
+    //     label: '12 hours',
+    //     minutes: 720,
+    //     value: '12h',
+    //     description: 'Half day'
+    // },
+    // {
+    //     label: '24 hours',
+    //     minutes: 1440,
+    //     value: '24h',
+    //     description: 'Full day'
+    // }
 ];
 
 /**
